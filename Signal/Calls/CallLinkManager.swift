@@ -10,7 +10,19 @@ import SignalServiceKit
 import SignalUI
 
 protocol CallLinkManager {
+    /// - Returns: An era ID.
+    func peekCallLink(
+        rootKey: CallLinkRootKey,
+        authCredential: SignalServiceKit.CallLinkAuthCredential
+    ) async throws -> String?
+
     func createCallLink(rootKey: CallLinkRootKey) async throws -> CallLinkManagerImpl.CreateResult
+
+    func deleteCallLink(
+        rootKey: CallLinkRootKey,
+        adminPasskey: Data,
+        authCredential: SignalServiceKit.CallLinkAuthCredential
+    ) async throws
 
     func updateCallLinkName(
         _ name: String,
@@ -47,6 +59,30 @@ class CallLinkManagerImpl: CallLinkManager {
         self.sfuClient = SignalRingRTC.SFUClient(httpClient: httpClient.ringRtcHttpClient)
         self.sfuClientHttpClient = httpClient
         self.tsAccountManager = tsAccountManager
+    }
+
+    // MARK: - Peek Call Link
+
+    struct PeekError: Error {
+        let errorCode: UInt16
+    }
+
+    func peekCallLink(
+        rootKey: CallLinkRootKey,
+        authCredential: SignalServiceKit.CallLinkAuthCredential
+    ) async throws -> String? {
+        let sfuUrl = DebugFlags.callingUseTestSFU.get() ? TSConstants.sfuTestURL : TSConstants.sfuURL
+        let secretParams = CallLinkSecretParams.deriveFromRootKey(rootKey.bytes)
+        let authCredentialPresentation = authCredential.present(callLinkParams: secretParams)
+        let peekResult = await self.sfuClient.peek(
+            sfuUrl: sfuUrl,
+            authCredentialPresentation: authCredentialPresentation.serialize(),
+            linkRootKey: rootKey
+        )
+        if let errorCode = peekResult.errorStatusCode {
+            throw PeekError(errorCode: errorCode)
+        }
+        return peekResult.peekInfo.eraId
     }
 
     // MARK: - Create Call Link
@@ -87,15 +123,31 @@ class CallLinkManagerImpl: CallLinkManager {
         let createCredentialPresentation = createCredential.present(roomId: roomId, userId: localIdentifiers.aci, serverParams: self.serverParams, callLinkParams: secretParams)
         let publicParams = secretParams.getPublicParams()
         let adminPasskey = CallLinkRootKey.generateAdminPasskey()
-        let callLinkState = CallLinkState(try await self.sfuClient.createCallLink(
+        let callLinkState = SignalServiceKit.CallLinkState(try await self.sfuClient.createCallLink(
             sfuUrl: sfuUrl,
             createCredentialPresentation: createCredentialPresentation.serialize(),
             linkRootKey: rootKey,
             adminPasskey: adminPasskey,
             callLinkPublicParams: publicParams.serialize(),
-            restrictions: CallLinkState.Restrictions.adminApproval
+            restrictions: SignalServiceKit.CallLinkState.Constants.defaultRequiresAdminApproval ? .adminApproval : .none
         ).unwrap())
         return CreateResult(adminPasskey: adminPasskey, callLinkState: callLinkState)
+    }
+
+    func deleteCallLink(
+        rootKey: CallLinkRootKey,
+        adminPasskey: Data,
+        authCredential: SignalServiceKit.CallLinkAuthCredential
+    ) async throws {
+        let sfuUrl = DebugFlags.callingUseTestSFU.get() ? TSConstants.sfuTestURL : TSConstants.sfuURL
+        let secretParams = CallLinkSecretParams.deriveFromRootKey(rootKey.bytes)
+        let authCredentialPresentation = authCredential.present(callLinkParams: secretParams)
+        return try await self.sfuClient.deleteCallLink(
+            sfuUrl: sfuUrl,
+            authCredentialPresentation: authCredentialPresentation.serialize(),
+            linkRootKey: rootKey,
+            adminPasskey: adminPasskey
+        ).unwrap()
     }
 
     func updateCallLinkName(

@@ -54,7 +54,8 @@ class IndividualCallViewController: OWSViewController, IndividualCallObserver {
         callService: callService,
         confirmationToastManager: callControlsConfirmationToastManager,
         callControlsDelegate: self,
-        sheetPanDelegate: self
+        sheetPanDelegate: self,
+        callDrawerDelegate: self
     )
 
     private var callService: CallService { AppEnvironment.shared.callService }
@@ -340,7 +341,7 @@ class IndividualCallViewController: OWSViewController, IndividualCallObserver {
 
     private var callControlsConfirmationToastContainerViewBottomConstraint: NSLayoutConstraint?
     private var callControlsConfirmationToastContainerViewBottomConstraintConstant: CGFloat {
-        return -self.bottomSheet.sheetHeight - 16
+        return -self.bottomSheet.minimizedHeight - 16
     }
 
     private func presentBottomSheet(_ animated: Bool) {
@@ -1415,5 +1416,15 @@ extension IndividualCallViewController: SheetPanDelegate {
         } else if bottomSheet.isCrossFading() {
             bottomSheetState = .transitioning
         }
+    }
+}
+
+extension IndividualCallViewController: CallDrawerDelegate {
+    func didPresentViewController(_ viewController: UIViewController) {
+    }
+
+    func didTapDone() {
+        bottomSheetState = .callControls
+        bottomSheet.minimizeHeight(animated: true)
     }
 }

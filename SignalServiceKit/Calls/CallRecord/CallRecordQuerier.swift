@@ -34,7 +34,7 @@ public protocol CallRecordQuerier {
     ///
     /// - Note
     /// The implementation of this method in ``CallRecordQuerierImpl`` relies on
-    /// the index `index_call_record_on_timestamp`.
+    /// the index `CallRecord_callBeganTimestamp`.
     func fetchCursor(
         ordering: FetchOrdering,
         tx: DBReadTransaction
@@ -48,7 +48,7 @@ public protocol CallRecordQuerier {
     ///
     /// - Note
     /// The implementation of this method in ``CallRecordQuerierImpl`` relies on
-    /// the index `index_call_record_on_status_and_timestamp`.
+    /// the index `CallRecord_status_callBeganTimestamp`.
     func fetchCursor(
         callStatus: CallRecord.CallStatus,
         ordering: FetchOrdering,
@@ -64,7 +64,7 @@ public protocol CallRecordQuerier {
     ///
     /// - Note
     /// The implementation of this method in ``CallRecordQuerierImpl`` relies on
-    /// the index `index_call_record_on_threadRowId_and_timestamp`.
+    /// the index `CallRecord_threadRowId_callBeganTimestamp`.
     func fetchCursor(
         threadRowId: Int64,
         ordering: FetchOrdering,
@@ -80,7 +80,7 @@ public protocol CallRecordQuerier {
     ///
     /// - Note
     /// The implementation of this method in ``CallRecordQuerierImpl`` relies on
-    /// the index `index_call_record_on_threadRowId_and_status_and_timestamp`.
+    /// the index `CallRecord_threadRowId_status_callBeganTimestamp`.
     func fetchCursor(
         threadRowId: Int64,
         callStatus: CallRecord.CallStatus,
@@ -103,7 +103,7 @@ public protocol CallRecordQuerier {
     ///
     /// - Note
     /// The implementation of this method in ``CallRecordQuerierImpl`` relies on
-    /// the index `index_call_record_on_callStatus_and_unreadStatus_and_timestamp`.
+    /// the index `CallRecord_callStatus_unreadStatus_callBeganTimestamp`.
     func fetchCursorForUnread(
         callStatus: CallRecord.CallStatus,
         ordering: FetchOrdering,
@@ -125,7 +125,7 @@ public protocol CallRecordQuerier {
     ///
     /// - Note
     /// The implementation of this method in ``CallRecordQuerierImpl`` relies on
-    /// the index `index_call_record_on_threadRowId_and_callStatus_and_unreadStatus_and_timestamp`.
+    /// the index `CallRecord_threadRowId_callStatus_unreadStatus_callBeganTimestamp`.
     func fetchCursorForUnread(
         threadRowId: Int64,
         callStatus: CallRecord.CallStatus,
@@ -162,19 +162,9 @@ class CallRecordQuerierImpl: CallRecordQuerier {
         tx: DBReadTransaction
     ) -> CallRecordCursor? {
         return fetchCursor(
-            ordering: ordering,
-            db: SDSDB.shimOnlyBridge(tx).database
-        )
-    }
-
-    func fetchCursor(
-        ordering: FetchOrdering,
-        db: Database
-    ) -> CallRecordCursor? {
-        return fetchCursor(
             columnArgs: [],
             ordering: ordering,
-            db: db
+            tx: tx
         )
     }
 
@@ -184,23 +174,11 @@ class CallRecordQuerierImpl: CallRecordQuerier {
         callStatus: CallRecord.CallStatus,
         ordering: FetchOrdering,
         tx: DBReadTransaction
-    ) -> CallRecordCursor? {
-        return fetchCursor(
-            callStatus: callStatus,
-            ordering: ordering,
-            db: SDSDB.shimOnlyBridge(tx).database
-        )
-    }
-
-    func fetchCursor(
-        callStatus: CallRecord.CallStatus,
-        ordering: FetchOrdering,
-        db: Database
     ) -> CallRecordCursor? {
         return fetchCursor(
             columnArgs: [ColumnArg(.callStatus, callStatus.intValue)],
             ordering: ordering,
-            db: db
+            tx: tx
         )
     }
 
@@ -210,23 +188,11 @@ class CallRecordQuerierImpl: CallRecordQuerier {
         threadRowId: Int64,
         ordering: FetchOrdering,
         tx: DBReadTransaction
-    ) -> CallRecordCursor? {
-        return fetchCursor(
-            threadRowId: threadRowId,
-            ordering: ordering,
-            db: SDSDB.shimOnlyBridge(tx).database
-        )
-    }
-
-    func fetchCursor(
-        threadRowId: Int64,
-        ordering: FetchOrdering,
-        db: Database
     ) -> CallRecordCursor? {
         return fetchCursor(
             columnArgs: [ColumnArg(.threadRowId, threadRowId)],
             ordering: ordering,
-            db: db
+            tx: tx
         )
     }
 
@@ -237,20 +203,6 @@ class CallRecordQuerierImpl: CallRecordQuerier {
         callStatus: CallRecord.CallStatus,
         ordering: FetchOrdering,
         tx: DBReadTransaction
-    ) -> CallRecordCursor? {
-        return fetchCursor(
-            threadRowId: threadRowId,
-            callStatus: callStatus,
-            ordering: ordering,
-            db: SDSDB.shimOnlyBridge(tx).database
-        )
-    }
-
-    func fetchCursor(
-        threadRowId: Int64,
-        callStatus: CallRecord.CallStatus,
-        ordering: FetchOrdering,
-        db: Database
     ) -> CallRecordCursor? {
         return fetchCursor(
             columnArgs: [
@@ -258,7 +210,7 @@ class CallRecordQuerierImpl: CallRecordQuerier {
                 ColumnArg(.callStatus, callStatus.intValue)
             ],
             ordering: ordering,
-            db: db
+            tx: tx
         )
     }
 
@@ -268,18 +220,6 @@ class CallRecordQuerierImpl: CallRecordQuerier {
         callStatus: CallRecord.CallStatus,
         ordering: FetchOrdering,
         tx: DBReadTransaction
-    ) -> CallRecordCursor? {
-        return fetchCursorForUnread(
-            callStatus: callStatus,
-            ordering: ordering,
-            db: SDSDB.shimOnlyBridge(tx).database
-        )
-    }
-
-    func fetchCursorForUnread(
-        callStatus: CallRecord.CallStatus,
-        ordering: FetchOrdering,
-        db: Database
     ) -> CallRecordCursor? {
         return fetchCursor(
             columnArgs: [
@@ -287,7 +227,7 @@ class CallRecordQuerierImpl: CallRecordQuerier {
                 ColumnArg(.unreadStatus, CallRecord.CallUnreadStatus.unread.rawValue)
             ],
             ordering: ordering,
-            db: db
+            tx: tx
         )
     }
 
@@ -298,20 +238,6 @@ class CallRecordQuerierImpl: CallRecordQuerier {
         callStatus: CallRecord.CallStatus,
         ordering: FetchOrdering,
         tx: DBReadTransaction
-    ) -> CallRecordCursor? {
-        return fetchCursorForUnread(
-            threadRowId: threadRowId,
-            callStatus: callStatus,
-            ordering: ordering,
-            db: SDSDB.shimOnlyBridge(tx).database
-        )
-    }
-
-    func fetchCursorForUnread(
-        threadRowId: Int64,
-        callStatus: CallRecord.CallStatus,
-        ordering: FetchOrdering,
-        db: Database
     ) -> CallRecordCursor? {
         return fetchCursor(
             columnArgs: [
@@ -320,7 +246,7 @@ class CallRecordQuerierImpl: CallRecordQuerier {
                 ColumnArg(.unreadStatus, CallRecord.CallUnreadStatus.unread.rawValue)
             ],
             ordering: ordering,
-            db: db
+            tx: tx
         )
     }
 
@@ -329,15 +255,18 @@ class CallRecordQuerierImpl: CallRecordQuerier {
     fileprivate func fetchCursor(
         columnArgs: [ColumnArg],
         ordering: FetchOrdering,
-        db: Database
+        tx: DBReadTransaction
     ) -> GRDBCallRecordCursor? {
         let (sqlString, sqlArgs) = compileQuery(columnArgs: columnArgs, ordering: ordering)
 
         do {
-            let grdbRecordCursor = try CallRecord.fetchCursor(db, SQLRequest(
-                sql: sqlString,
-                arguments: StatementArguments(sqlArgs)
-            ))
+            let grdbRecordCursor = try CallRecord.fetchCursor(
+                tx.databaseConnection,
+                SQLRequest(
+                    sql: sqlString,
+                    arguments: StatementArguments(sqlArgs)
+                )
+            )
 
             return GRDBCallRecordCursor(grdbRecordCursor: grdbRecordCursor)
         } catch let error {
@@ -397,12 +326,6 @@ class CallRecordQuerierImpl: CallRecordQuerier {
     }
 }
 
-private extension SDSAnyReadTransaction {
-    var database: Database {
-        return unwrapGrdbRead.database
-    }
-}
-
 #if TESTABLE_BUILD
 
 final class ExplainingCallRecordQuerierImpl: CallRecordQuerierImpl {
@@ -411,12 +334,12 @@ final class ExplainingCallRecordQuerierImpl: CallRecordQuerierImpl {
     override fileprivate func fetchCursor(
         columnArgs: [ColumnArg],
         ordering: FetchOrdering,
-        db: Database
+        tx: DBReadTransaction
     ) -> GRDBCallRecordCursor? {
         let (sqlString, sqlArgs) = compileQuery(columnArgs: columnArgs, ordering: ordering)
 
         guard
-            let explanationRow = try? Row.fetchOne(db, SQLRequest(
+            let explanationRow = try? Row.fetchOne(tx.databaseConnection, SQLRequest(
                 sql: "EXPLAIN QUERY PLAN \(sqlString)",
                 arguments: StatementArguments(sqlArgs)
             )),
@@ -432,7 +355,7 @@ final class ExplainingCallRecordQuerierImpl: CallRecordQuerierImpl {
         return super.fetchCursor(
             columnArgs: columnArgs,
             ordering: ordering,
-            db: db
+            tx: tx
         )
     }
 }

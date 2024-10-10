@@ -23,10 +23,13 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
     // `callManager` continues to work properly.
     private let callManagerHttpClient: AnyObject
 
+    private var adHocCallRecordManager: any AdHocCallRecordManager { DependenciesBridge.shared.adHocCallRecordManager }
     private let appReadiness: AppReadiness
     private var audioSession: AudioSession { NSObject.audioSession }
+    private var callLinkStore: any CallLinkRecordStore { DependenciesBridge.shared.callLinkStore }
     let authCredentialManager: any AuthCredentialManager
     private var databaseStorage: SDSDatabaseStorage { NSObject.databaseStorage }
+    private let db: any DB
     private var deviceSleepManager: DeviceSleepManager { DeviceSleepManager.shared }
     private var groupCallManager: GroupCallManager { NSObject.groupCallManager }
     private var reachabilityManager: SSKReachabilityManager { NSObject.reachabilityManager }
@@ -38,6 +41,8 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
     let callLinkManager: CallLinkManagerImpl
     let callLinkFetcher: CallLinkFetcherImpl
     let callLinkStateUpdater: CallLinkStateUpdater
+
+    private var adHocCallStateObserver: AdHocCallStateObserver?
 
     /// Needs to be lazily initialized, because it uses singletons that are not
     /// available when this class is initialized.
@@ -79,6 +84,8 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
         authCredentialManager: any AuthCredentialManager,
         callLinkPublicParams: GenericServerPublicParams,
         callLinkStore: any CallLinkRecordStore,
+        callRecordDeleteManager: any CallRecordDeleteManager,
+        callRecordStore: any CallRecordStore,
         db: any DB,
         mutableCurrentCall: AtomicValue<SignalCall?>,
         networkManager: NetworkManager,
@@ -111,10 +118,14 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
         self.callLinkStateUpdater = CallLinkStateUpdater(
             authCredentialManager: authCredentialManager,
             callLinkFetcher: self.callLinkFetcher,
+            callLinkManager: self.callLinkManager,
             callLinkStore: callLinkStore,
+            callRecordDeleteManager: callRecordDeleteManager,
+            callRecordStore: callRecordStore,
             db: db,
             tsAccountManager: tsAccountManager
         )
+        self.db = db
         self.callManager.delegate = self
         SwiftSingletons.register(self)
         self.callServiceState.addObserver(self)
@@ -185,7 +196,10 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
             break
         case .individual(let call):
             call.removeObserver(self)
-        case .groupThread(let call as GroupCall), .callLink(let call as GroupCall):
+        case .groupThread(let call):
+            call.removeObserver(self)
+        case .callLink(let call):
+            self.adHocCallStateObserver = nil
             call.removeObserver(self)
         }
         switch newValue?.mode {
@@ -193,7 +207,14 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
             break
         case .individual(let call):
             call.addObserverAndSyncState(self)
-        case .groupThread(let call as GroupCall), .callLink(let call as GroupCall):
+        case .groupThread(let call):
+            call.addObserver(self, syncStateImmediately: true)
+        case .callLink(let call):
+            self.adHocCallStateObserver = AdHocCallStateObserver(
+                callLinkCall: call,
+                adHocCallRecordManager: adHocCallRecordManager,
+                db: db
+            )
             call.addObserver(self, syncStateImmediately: true)
         }
 
@@ -246,7 +267,6 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
                 )
             }
         case .callLink:
-            // [CallLink] TODO: .
             break
         }
     }
@@ -542,7 +562,6 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
     @MainActor
     func buildAndConnectCallLinkCall(
         callLink: CallLink,
-        adminPasskey: Data?,
         callLinkStateRetrievalStrategy: CallLinkStateRetrievalStrategy
     ) async throws -> (SignalCall, CallLinkCall)? {
         let state: SignalServiceKit.CallLinkState
@@ -550,12 +569,18 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
         case .reuse(let callLinkState):
             state = callLinkState
         case .fetch:
-            state = try await callLinkStateUpdater.readCallLink(rootKey: callLink.rootKey)
+            state = try await callLinkStateUpdater.readCallLink(rootKey: callLink.rootKey).get()
         }
         let localIdentifiers = DependenciesBridge.shared.tsAccountManager.localIdentifiersWithMaybeSneakyTransaction!
         let authCredential = try await authCredentialManager.fetchCallLinkAuthCredential(localIdentifiers: localIdentifiers)
+        let (adminPasskey, isDeleted) = try databaseStorage.read { tx -> (Data?, Bool) in
+            let callLinkRecord = try callLinkStore.fetch(roomId: callLink.rootKey.deriveRoomId(), tx: tx.asV2Read)
+            return (callLinkRecord?.adminPasskey, callLinkRecord?.isDeleted == true)
+        }
+        if isDeleted {
+            throw OWSGenericError("Can't join a call link that you've deleted.")
+        }
         return _buildAndConnectGroupCall(isOutgoingVideoMuted: false) { () -> (SignalCall, CallLinkCall)? in
-            // [CallLink] TODO: Read adminPasskey from disk instead of a parameter.
             let videoCaptureController = VideoCaptureController()
             let sfuUrl = DebugFlags.callingUseTestSFU.get() ? TSConstants.sfuTestURL : TSConstants.sfuURL
             let secretParams = CallLinkSecretParams.deriveFromRootKey(callLink.rootKey.bytes)
@@ -831,7 +856,6 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
                 owsFailDebug("Failed to fetch membership info: \(error)")
                 return
             }
-            // [CallLink] TODO: .
             groupThreadCall.ringRtcCall.updateGroupMembers(members: membershipInfo)
         }
     }
@@ -917,8 +941,7 @@ extension CallService: GroupCallObserver {
             }
 
         case .callLink:
-            // [CallLink] TODO: Bump the call record in the calls tab.
-            break
+            self.adHocCallStateObserver!.checkIfJoined()
         }
     }
 
@@ -956,8 +979,7 @@ extension CallService: GroupCallObserver {
             }
 
         case .callLink:
-            // [CallLink] TODO: Bump the call record in the calls tab if needed.
-            break
+            self.adHocCallStateObserver!.checkIfJoined()
         }
     }
 

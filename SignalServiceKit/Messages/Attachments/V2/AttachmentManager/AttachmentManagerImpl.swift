@@ -9,6 +9,7 @@ public class AttachmentManagerImpl: AttachmentManager {
     private let attachmentStore: AttachmentStore
     private let orphanedAttachmentCleaner: OrphanedAttachmentCleaner
     private let orphanedAttachmentStore: OrphanedAttachmentStore
+    private let orphanedBackupAttachmentManager: OrphanedBackupAttachmentManager
     private let stickerManager: Shims.StickerManager
 
     public init(
@@ -16,12 +17,14 @@ public class AttachmentManagerImpl: AttachmentManager {
         attachmentStore: AttachmentStore,
         orphanedAttachmentCleaner: OrphanedAttachmentCleaner,
         orphanedAttachmentStore: OrphanedAttachmentStore,
+        orphanedBackupAttachmentManager: OrphanedBackupAttachmentManager,
         stickerManager: Shims.StickerManager
     ) {
         self.attachmentDownloadManager = attachmentDownloadManager
         self.attachmentStore = attachmentStore
         self.orphanedAttachmentCleaner = orphanedAttachmentCleaner
         self.orphanedAttachmentStore = orphanedAttachmentStore
+        self.orphanedBackupAttachmentManager = orphanedBackupAttachmentManager
         self.stickerManager = stickerManager
     }
 
@@ -276,6 +279,13 @@ public class AttachmentManagerImpl: AttachmentManager {
             tx: tx
         )
 
+        if let mediaName = attachmentParams.mediaName {
+            try orphanedBackupAttachmentManager.didCreateOrUpdateAttachment(
+                withMediaName: mediaName,
+                tx: tx
+            )
+        }
+
         switch referenceParams.owner {
         case .message(.sticker(let stickerInfo)):
             // Only for stickers, schedule a high priority "download"
@@ -456,8 +466,9 @@ public class AttachmentManagerImpl: AttachmentManager {
             sourceUnencryptedByteCount = nil
         }
 
+        let referenceParams: AttachmentReference.ConstructionParams
         do {
-            let referenceParams = AttachmentReference.ConstructionParams(
+            referenceParams = AttachmentReference.ConstructionParams(
                 owner: try owner.build(
                     orderInOwner: sourceOrder,
                     knownIdInOwner: knownIdFromProto,
@@ -471,14 +482,38 @@ public class AttachmentManagerImpl: AttachmentManager {
                 sourceUnencryptedByteCount: sourceUnencryptedByteCount,
                 sourceMediaSizePixels: sourceMediaSizePixels
             )
+        } catch {
+            return .failure(.dbInsertionError(error))
+        }
 
+        do {
             try attachmentStore.insert(
                 attachmentParams,
                 reference: referenceParams,
                 tx: tx
             )
 
+            if let mediaName = attachmentParams.mediaName {
+                try orphanedBackupAttachmentManager.didCreateOrUpdateAttachment(
+                    withMediaName: mediaName,
+                    tx: tx
+                )
+            }
+
             return .success(())
+        } catch let AttachmentInsertError.duplicateMediaName(existingAttachmentId) {
+            // We already have an attachment with the same mediaName (likely from this same
+            // backup). Just point the reference at the existing attachment.
+            do {
+                try attachmentStore.addOwner(
+                    referenceParams,
+                    for: existingAttachmentId,
+                    tx: tx
+                )
+                return .success(())
+            } catch {
+                return .failure(.dbInsertionError(error))
+            }
         } catch {
             return .failure(.dbInsertionError(error))
         }
@@ -604,19 +639,25 @@ public class AttachmentManagerImpl: AttachmentManager {
                 sourceUnencryptedByteCount: pendingAttachment.unencryptedByteCount,
                 sourceMediaSizePixels: mediaSizePixels
             )
+            let streamInfo = Attachment.StreamInfo(
+                sha256ContentHash: pendingAttachment.sha256ContentHash,
+                encryptedByteCount: pendingAttachment.encryptedByteCount,
+                unencryptedByteCount: pendingAttachment.unencryptedByteCount,
+                contentType: pendingAttachment.validatedContentType,
+                digestSHA256Ciphertext: pendingAttachment.digestSHA256Ciphertext,
+                localRelativeFilePath: pendingAttachment.localRelativeFilePath
+            )
             let attachmentParams = Attachment.ConstructionParams.fromStream(
                 blurHash: pendingAttachment.blurHash,
                 mimeType: pendingAttachment.mimeType,
                 encryptionKey: pendingAttachment.encryptionKey,
-                streamInfo: .init(
-                    sha256ContentHash: pendingAttachment.sha256ContentHash,
-                    encryptedByteCount: pendingAttachment.encryptedByteCount,
-                    unencryptedByteCount: pendingAttachment.unencryptedByteCount,
-                    contentType: pendingAttachment.validatedContentType,
-                    digestSHA256Ciphertext: pendingAttachment.digestSHA256Ciphertext,
-                    localRelativeFilePath: pendingAttachment.localRelativeFilePath
-                ),
+                streamInfo: streamInfo,
                 mediaName: Attachment.mediaName(digestSHA256Ciphertext: pendingAttachment.digestSHA256Ciphertext)
+            )
+
+            let hasOrphanRecord = orphanedAttachmentStore.orphanAttachmentExists(
+                with: pendingAttachment.orphanRecordId,
+                tx: tx
             )
 
             do {
@@ -624,10 +665,6 @@ public class AttachmentManagerImpl: AttachmentManager {
                     sha256ContentHash: pendingAttachment.sha256ContentHash,
                     tx: tx
                 )?.streamInfo?.localRelativeFilePath == pendingAttachment.localRelativeFilePath
-                let hasOrphanRecord = orphanedAttachmentStore.orphanAttachmentExists(
-                    with: pendingAttachment.orphanRecordId,
-                    tx: tx
-                )
 
                 // Typically, we'd expect an orphan record to exist (which ensures that
                 // if this creation transaction fails, the file on disk gets cleaned up).
@@ -649,17 +686,52 @@ public class AttachmentManagerImpl: AttachmentManager {
                     // Make sure to clear out the pending attachment from the orphan table so it isn't deleted!
                     try orphanedAttachmentCleaner.releasePendingAttachment(withId: pendingAttachment.orphanRecordId, tx: tx)
                 }
-            } catch let AttachmentInsertError.duplicatePlaintextHash(existingAttachmentId) {
-                // Already have an attachment with the same plaintext hash! Create a new reference to it instead.
-                // DO NOT remove the pending attachment's orphan table row, so the pending copy gets cleaned up.
+                if let mediaName = attachmentParams.mediaName {
+                    try orphanedBackupAttachmentManager.didCreateOrUpdateAttachment(
+                        withMediaName: mediaName,
+                        tx: tx
+                    )
+                }
+            } catch let error {
+                let existingAttachmentId: Attachment.IDType
+                if case let AttachmentInsertError.duplicatePlaintextHash(id) = error {
+                    existingAttachmentId = id
+                    // DO NOT remove the pending attachment's orphan table row, so the pending copy gets cleaned up.
+                } else if case let AttachmentInsertError.duplicateMediaName(id) = error {
+                    existingAttachmentId = id
+
+                    guard let existingAttachment = self.attachmentStore.fetch(id: id, tx: tx) else {
+                        throw OWSAssertionError("Matched attachment missing")
+                    }
+
+                    if existingAttachment.asStream() == nil {
+                        // Set the stream info on the existing attachment, if needed.
+                        try self.attachmentStore.merge(
+                            streamInfo: streamInfo,
+                            into: existingAttachment,
+                            validatedMimeType: pendingAttachment.mimeType,
+                            tx: tx
+                        )
+
+                        if hasOrphanRecord {
+                            // Make sure to clear out the pending attachment from the orphan table so it isn't deleted!
+                            try self.orphanedAttachmentCleaner.releasePendingAttachment(
+                                withId: pendingAttachment.orphanRecordId,
+                                tx: tx
+                            )
+                        }
+                    }
+                } else {
+                    throw error
+                }
+
+                // Already have an attachment with the same plaintext hash or media name! Create a new reference to it instead.
                 try attachmentStore.addOwner(
                     referenceParams,
                     for: existingAttachmentId,
                     tx: tx
                 )
                 return
-            } catch let error {
-                throw error
             }
         }
     }
@@ -786,6 +858,13 @@ public class AttachmentManagerImpl: AttachmentManager {
                 reference: referenceParams,
                 tx: tx
             )
+
+            if let mediaName = attachmentParams.mediaName {
+                try orphanedBackupAttachmentManager.didCreateOrUpdateAttachment(
+                    withMediaName: mediaName,
+                    tx: tx
+                )
+            }
 
             // If we know we have a stream, enqueue the download at high priority
             // so that copy happens ASAP.

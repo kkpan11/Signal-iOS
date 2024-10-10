@@ -12,7 +12,7 @@ final class CallRecordMissedCallManagerTest: XCTestCase {
     private var mockConversationIdAdapter: MockConversationIdAdapter!
     private var mockCallRecordQuerier: MockCallRecordQuerier!
     private var mockCallRecordStore: MockCallRecordStore!
-    private var mockDB: MockDB!
+    private var mockDB: InMemoryDB!
     private var mockSyncMessageSender: MockSyncMessageSender!
 
     private var missedCallManager: CallRecordMissedCallManagerImpl!
@@ -21,7 +21,7 @@ final class CallRecordMissedCallManagerTest: XCTestCase {
         mockConversationIdAdapter = MockConversationIdAdapter()
         mockCallRecordQuerier = MockCallRecordQuerier()
         mockCallRecordStore = MockCallRecordStore()
-        mockDB = MockDB()
+        mockDB = InMemoryDB()
         mockSyncMessageSender = MockSyncMessageSender()
 
         missedCallManager = CallRecordMissedCallManagerImpl(
@@ -247,11 +247,11 @@ private extension CallRecord {
 }
 
 private class MockConversationIdAdapter: CallRecordSyncMessageConversationIdAdapter {
-    func hydrate(conversationId: Data, callId: UInt64, tx: DBReadTransaction) -> CallRecord? {
+    func hydrate(conversationId: Data, callId: UInt64, tx: DBReadTransaction) throws -> CallRecord? {
         owsFail("Not implemented!")
     }
 
-    func getConversationId(callRecord: CallRecord, tx: DBReadTransaction) -> Data? {
+    func getConversationId(callRecord: CallRecord, tx: DBReadTransaction) throws -> Data {
         return Aci.randomForTesting().serviceIdBinary.asData
     }
 }

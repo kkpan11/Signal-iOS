@@ -41,7 +41,7 @@ public protocol BackupAttachmentUploadManager {
 public class BackupAttachmentUploadManagerImpl: BackupAttachmentUploadManager {
 
     private let backupAttachmentUploadStore: BackupAttachmentUploadStore
-    private let db: DB
+    private let db: any DB
     private let taskQueue: TaskQueueLoader<TaskRunner>
 
     public init(
@@ -49,7 +49,7 @@ public class BackupAttachmentUploadManagerImpl: BackupAttachmentUploadManager {
         attachmentUploadManager: AttachmentUploadManager,
         backupAttachmentUploadStore: BackupAttachmentUploadStore,
         dateProvider: @escaping DateProvider,
-        db: DB,
+        db: any DB,
         messageBackupRequestManager: MessageBackupRequestManager,
         tsAccountManager: TSAccountManager
     ) {
@@ -113,7 +113,7 @@ public class BackupAttachmentUploadManagerImpl: BackupAttachmentUploadManager {
         private let attachmentUploadManager: AttachmentUploadManager
         private let backupAttachmentUploadStore: BackupAttachmentUploadStore
         private let dateProvider: DateProvider
-        private let db: DB
+        private let db: any DB
         private let messageBackupRequestManager: MessageBackupRequestManager
         private let tsAccountManager: TSAccountManager
 
@@ -124,7 +124,7 @@ public class BackupAttachmentUploadManagerImpl: BackupAttachmentUploadManager {
             attachmentUploadManager: AttachmentUploadManager,
             backupAttachmentUploadStore: BackupAttachmentUploadStore,
             dateProvider: @escaping DateProvider,
-            db: DB,
+            db: any DB,
             messageBackupRequestManager: MessageBackupRequestManager,
             tsAccountManager: TSAccountManager
         ) {
@@ -172,7 +172,7 @@ public class BackupAttachmentUploadManagerImpl: BackupAttachmentUploadManager {
             // TODO: [Backups] get the real upload era
             let currentUploadEra: String
             do {
-                currentUploadEra = try MessageBackupMessageAttachmentArchiver.uploadEra()
+                currentUploadEra = try MessageBackupMessageAttachmentArchiver.currentUploadEra()
             } catch let error {
                 try? await loader.stop(reason: error)
                 return .unretryableError(OWSAssertionError("Unable to get current upload era: \(error)"))
@@ -323,8 +323,7 @@ fileprivate extension AttachmentStream {
         if let thumbnailMediaTierInfo = attachment.thumbnailMediaTierInfo {
             return thumbnailMediaTierInfo.uploadEra != currentUploadEra
         } else {
-            // We only generate thumbnails for visual media.
-            return contentType.isVisualMedia
+            return AttachmentBackupThumbnail.canBeThumbnailed(self.attachment)
         }
     }
 }

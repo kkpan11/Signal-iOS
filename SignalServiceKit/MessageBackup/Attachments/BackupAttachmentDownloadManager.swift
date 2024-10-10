@@ -42,7 +42,7 @@ public class BackupAttachmentDownloadManagerImpl: BackupAttachmentDownloadManage
     private let appReadiness: AppReadiness
     private let backupAttachmentDownloadStore: BackupAttachmentDownloadStore
     private let dateProvider: DateProvider
-    private let db: DB
+    private let db: any DB
     private let mediaBandwidthPreferenceStore: MediaBandwidthPreferenceStore
     private let reachabilityManager: SSKReachabilityManager
     private let taskQueue: TaskQueueLoader<TaskRunner>
@@ -54,7 +54,7 @@ public class BackupAttachmentDownloadManagerImpl: BackupAttachmentDownloadManage
         attachmentDownloadManager: AttachmentDownloadManager,
         backupAttachmentDownloadStore: BackupAttachmentDownloadStore,
         dateProvider: @escaping DateProvider,
-        db: DB,
+        db: any DB,
         mediaBandwidthPreferenceStore: MediaBandwidthPreferenceStore,
         messageBackupRequestManager: MessageBackupRequestManager,
         reachabilityManager: SSKReachabilityManager,
@@ -205,7 +205,7 @@ public class BackupAttachmentDownloadManagerImpl: BackupAttachmentDownloadManage
         private let attachmentDownloadManager: AttachmentDownloadManager
         private let backupAttachmentDownloadStore: BackupAttachmentDownloadStore
         private let dateProvider: DateProvider
-        private let db: DB
+        private let db: any DB
         private let mediaBandwidthPreferenceStore: MediaBandwidthPreferenceStore
         private let messageBackupRequestManager: MessageBackupRequestManager
         private let tsAccountManager: TSAccountManager
@@ -219,7 +219,7 @@ public class BackupAttachmentDownloadManagerImpl: BackupAttachmentDownloadManage
             attachmentDownloadManager: AttachmentDownloadManager,
             backupAttachmentDownloadStore: BackupAttachmentDownloadStore,
             dateProvider: @escaping DateProvider,
-            db: DB,
+            db: any DB,
             mediaBandwidthPreferenceStore: MediaBandwidthPreferenceStore,
             messageBackupRequestManager: MessageBackupRequestManager,
             tsAccountManager: TSAccountManager
@@ -415,18 +415,18 @@ public class BackupAttachmentDownloadManagerImpl: BackupAttachmentDownloadManage
 
             let canDownloadTransitTierFullsize: Bool
             if let transitTierInfo = attachment.transitTierInfo {
-                // Download if the upload was < 30 days old,
+                // Download if the upload was < 45 days old,
                 // otherwise don't bother trying automatically.
                 // (The user could still try a manual download later).
                 canDownloadTransitTierFullsize = Date(millisecondsSince1970: transitTierInfo.uploadTimestamp)
-                    .addingTimeInterval(kMonthInterval)
+                    .addingTimeInterval(45 * kDayInterval)
                     .isAfter(dateProvider())
             } else {
                 canDownloadTransitTierFullsize = false
             }
 
             let canDownloadThumbnail =
-                MimeTypeUtil.isSupportedVisualMediaMimeType(attachment.mimeType)
+                AttachmentBackupThumbnail.canBeThumbnailed(attachment)
                 && attachment.thumbnailMediaTierInfo != nil
 
             let downloadPriority: AttachmentDownloadPriority =

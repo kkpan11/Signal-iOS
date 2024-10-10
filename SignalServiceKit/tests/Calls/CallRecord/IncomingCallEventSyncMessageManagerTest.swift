@@ -19,7 +19,7 @@ final class IncomingCallEventSyncMessageManagerTest: XCTestCase {
     private var mockRecipientDatabaseTable: MockRecipientDatabaseTable!
     private var mockThreadStore: MockThreadStore!
 
-    private var mockDB = MockDB()
+    private var mockDB = InMemoryDB()
     private var incomingSyncMessageManager: IncomingCallEventSyncMessageManagerImpl!
 
     override func setUp() {
@@ -41,6 +41,8 @@ final class IncomingCallEventSyncMessageManagerTest: XCTestCase {
         }
 
         incomingSyncMessageManager = IncomingCallEventSyncMessageManagerImpl(
+            adHocCallRecordManager: MockAdHocCallRecordManager(),
+            callLinkStore: MockCallLinkRecordStore(),
             callRecordStore: mockCallRecordStore,
             callRecordDeleteManager: mockCallRecordDeleteManager,
             groupCallRecordManager: mockGroupCallRecordManager,

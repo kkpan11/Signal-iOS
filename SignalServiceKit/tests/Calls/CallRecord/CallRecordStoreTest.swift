@@ -46,8 +46,8 @@ final class CallRecordStoreTest: XCTestCase {
         let interaction = TSInteraction(timestamp: 0, receivedAtTimestamp: 0, thread: thread)
 
         inMemoryDB.write { tx in
-            try! thread.asRecord().insert(InMemoryDB.shimOnlyBridge(tx).db)
-            try! interaction.asRecord().insert(InMemoryDB.shimOnlyBridge(tx).db)
+            try! thread.asRecord().insert(tx.db)
+            try! interaction.asRecord().insert(tx.db)
         }
 
         return (thread.sqliteRowId!, interaction.sqliteRowId!)
@@ -60,16 +60,16 @@ final class CallRecordStoreTest: XCTestCase {
             callRecordStore.fetch(
                 callId: 1234,
                 conversationId: .thread(threadRowId: 6789),
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             )
         }
 
-        assertExplanation(contains: "index_call_record_on_callId_and_threadId")
+        assertExplanation(contains: "CallRecord_threadRowId_callId")
     }
 
     func testFetchByInteractionRowIdUsesIndex() {
         _ = inMemoryDB.read { tx in
-            callRecordStore.fetch(interactionRowId: 1234, db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore.fetch(interactionRowId: 1234, tx: tx)
         }
 
         assertExplanation(contains: "sqlite_autoindex_CallRecord_1")
@@ -95,20 +95,20 @@ final class CallRecordStoreTest: XCTestCase {
         let callRecord = makeCallRecord()
 
         inMemoryDB.write { tx in
-            callRecordStore.insert(callRecord: callRecord, db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore._insert(callRecord: callRecord, tx: tx)
         }
 
         let fetchedByCallId = inMemoryDB.read { tx in
             callRecordStore.fetch(
                 callId: callRecord.callId,
                 conversationId: .thread(threadRowId: callRecord.threadRowId),
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             ).unwrapped
         }
         XCTAssertTrue(callRecord.matches(fetchedByCallId))
 
         let fetchedByInteractionRowId = inMemoryDB.read { tx in
-            callRecordStore.fetch(interactionRowId: callRecord.interactionRowId, db: InMemoryDB.shimOnlyBridge(tx).db)!
+            callRecordStore.fetch(interactionRowId: callRecord.interactionRowId, tx: tx)!
         }
         XCTAssertTrue(callRecord.matches(fetchedByInteractionRowId))
     }
@@ -127,7 +127,7 @@ final class CallRecordStoreTest: XCTestCase {
             switch callRecordStore.fetch(
                 callId: callId,
                 conversationId: .thread(threadRowId: threadRowId),
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             ) {
             case .matchFound, .matchNotFound:
                 XCTFail("Unexpected fetch result!")
@@ -145,25 +145,25 @@ final class CallRecordStoreTest: XCTestCase {
         let callRecord2 = makeCallRecord()
 
         inMemoryDB.write { tx in
-            callRecordStore.insert(callRecord: callRecord1, db: InMemoryDB.shimOnlyBridge(tx).db)
-            callRecordStore.insert(callRecord: callRecord2, db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore._insert(callRecord: callRecord1, tx: tx)
+            callRecordStore._insert(callRecord: callRecord2, tx: tx)
         }
 
         inMemoryDB.write { tx in
-            callRecordStore.delete(callRecords: [callRecord1, callRecord2], db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore._delete(callRecords: [callRecord1, callRecord2], tx: tx)
         }
 
         inMemoryDB.read { tx in
             for callRecord in [callRecord1, callRecord2] {
                 XCTAssertNil(callRecordStore.fetch(
                     interactionRowId: callRecord.interactionRowId,
-                    db: InMemoryDB.shimOnlyBridge(tx).db
+                    tx: tx
                 ))
 
                 switch callRecordStore.fetch(
                     callId: callRecord.callId,
                     conversationId: .thread(threadRowId: callRecord.threadRowId),
-                    db: InMemoryDB.shimOnlyBridge(tx).db
+                    tx: tx
                 ) {
                 case .matchNotFound:
                     // Test pass
@@ -181,14 +181,14 @@ final class CallRecordStoreTest: XCTestCase {
         let callRecord = makeCallRecord(callStatus: .group(.generic))
 
         inMemoryDB.write { tx in
-            callRecordStore.insert(callRecord: callRecord, db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore._insert(callRecord: callRecord, tx: tx)
         }
 
         inMemoryDB.write { tx in
-            callRecordStore.updateCallAndUnreadStatus(
+            callRecordStore._updateCallAndUnreadStatus(
                 callRecord: callRecord,
                 newCallStatus: .group(.joined),
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             )
         }
 
@@ -196,7 +196,7 @@ final class CallRecordStoreTest: XCTestCase {
             callRecordStore.fetch(
                 callId: callRecord.callId,
                 conversationId: .thread(threadRowId: callRecord.threadRowId),
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             ).unwrapped
         }
 
@@ -228,10 +228,12 @@ final class CallRecordStoreTest: XCTestCase {
             (.group(.ringingMissed), .unread, .group(.ringing), .read),
             (.group(.ringingMissed), .unread, .group(.ringingAccepted), .read),
             (.group(.ringingMissed), .unread, .group(.ringingDeclined), .read),
+
+            (.callLink(.generic), .read, .callLink(.joined), .read),
+            (.callLink(.joined), .read, .callLink(.generic), .read),
         ]
-        // [CallLink] TODO: Add support for these tests if needed.
         XCTAssertEqual(
-            testCases.count + 2,
+            testCases.count,
             CallRecord.CallStatus.allCases.count
         )
 
@@ -240,12 +242,12 @@ final class CallRecordStoreTest: XCTestCase {
             XCTAssertEqual(callRecord.unreadStatus, beforeUnreadStatus)
 
             inMemoryDB.write { tx in
-                callRecordStore.insert(callRecord: callRecord, db: InMemoryDB.shimOnlyBridge(tx).db)
+                callRecordStore._insert(callRecord: callRecord, tx: tx)
 
-                callRecordStore.updateCallAndUnreadStatus(
+                callRecordStore._updateCallAndUnreadStatus(
                     callRecord: callRecord,
                     newCallStatus: afterCallStatus,
-                    db: InMemoryDB.shimOnlyBridge(tx).db
+                    tx: tx
                 )
                 XCTAssertEqual(callRecord.callStatus, afterCallStatus)
                 XCTAssertEqual(callRecord.unreadStatus, afterUnreadStatus)
@@ -253,7 +255,7 @@ final class CallRecordStoreTest: XCTestCase {
                 let fetched = callRecordStore.fetch(
                     callId: callRecord.callId,
                     conversationId: .thread(threadRowId: callRecord.threadRowId),
-                    db: InMemoryDB.shimOnlyBridge(tx).db
+                    tx: tx
                 ).unwrapped
                 XCTAssertTrue(callRecord.matches(fetched))
             }
@@ -267,9 +269,8 @@ final class CallRecordStoreTest: XCTestCase {
         XCTAssertEqual(unreadCallRecord.unreadStatus, .unread)
 
         inMemoryDB.write { tx in
-            let db = InMemoryDB.shimOnlyBridge(tx).db
-            callRecordStore.insert(callRecord: unreadCallRecord, db: db)
-            callRecordStore.markAsRead(callRecord: unreadCallRecord, db: db)
+            callRecordStore._insert(callRecord: unreadCallRecord, tx: tx)
+            callRecordStore.markAsRead(callRecord: unreadCallRecord, tx: tx)
             XCTAssertEqual(unreadCallRecord.unreadStatus, .read)
         }
 
@@ -277,7 +278,7 @@ final class CallRecordStoreTest: XCTestCase {
             callRecordStore.fetch(
                 callId: unreadCallRecord.callId,
                 conversationId: .thread(threadRowId: unreadCallRecord.threadRowId),
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             ).unwrapped
         }
 
@@ -291,14 +292,14 @@ final class CallRecordStoreTest: XCTestCase {
         let (newThreadRowId, _) = insertThreadAndInteraction()
 
         inMemoryDB.write { tx in
-            callRecordStore.insert(callRecord: callRecord, db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore._insert(callRecord: callRecord, tx: tx)
         }
 
         inMemoryDB.write { tx in
             callRecordStore.updateWithMergedThread(
                 fromThreadRowId: callRecord.threadRowId,
                 intoThreadRowId: newThreadRowId,
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             )
         }
 
@@ -306,7 +307,7 @@ final class CallRecordStoreTest: XCTestCase {
             callRecordStore.fetch(
                 callId: callRecord.callId,
                 conversationId: .thread(threadRowId: newThreadRowId),
-                db: InMemoryDB.shimOnlyBridge(tx).db
+                tx: tx
             ).unwrapped
         }
 
@@ -318,32 +319,27 @@ final class CallRecordStoreTest: XCTestCase {
 
     // MARK: - Deletion cascades
 
-    func testDeletingInteractionDeletesCallRecord() {
+    func testDeletingInteractionDeletesCallRecord() throws {
         let callRecord = makeCallRecord()
 
         inMemoryDB.write { tx in
-            callRecordStore.insert(callRecord: callRecord, db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore._insert(callRecord: callRecord, tx: tx)
         }
 
-        inMemoryDB.write { tx in
-            let db = InMemoryDB.shimOnlyBridge(tx).db
-            db.executeHandlingErrors(sql: """
-                DELETE FROM model_TSInteraction
-                WHERE id = \(callRecord.interactionRowId)
-            """, arguments: .init())
-        }
+        try inMemoryDB.write { tx in
+            XCTAssertThrowsError(
+                try tx.db.execute(
+                    sql: "DELETE FROM model_TSInteraction WHERE id = ?",
+                    arguments: [callRecord.interactionRowId]
+                )
+            ) { error in
+                guard let error = error as? GRDB.DatabaseError else {
+                    XCTFail("Unexpected error!")
+                    return
+                }
 
-        inMemoryDB.read { tx in
-            switch callRecordStore.fetch(
-                callId: callRecord.callId,
-                conversationId: .thread(threadRowId: callRecord.threadRowId),
-                db: InMemoryDB.shimOnlyBridge(tx).db
-            ) {
-            case .matchNotFound:
-                // Test pass
-                break
-            case .matchFound, .matchDeleted:
-                XCTFail("Unexpectedly found remnants of record that should've been deleted!")
+                XCTAssertEqual(error.resultCode, .SQLITE_CONSTRAINT)
+                XCTAssertEqual(error.extendedResultCode, .SQLITE_CONSTRAINT_TRIGGER)
             }
         }
     }
@@ -356,7 +352,7 @@ final class CallRecordStoreTest: XCTestCase {
         let callRecord = makeCallRecord()
 
         inMemoryDB.write { tx in
-            callRecordStore.insert(callRecord: callRecord, db: InMemoryDB.shimOnlyBridge(tx).db)
+            callRecordStore._insert(callRecord: callRecord, tx: tx)
         }
 
         try inMemoryDB.write { tx in
@@ -366,7 +362,7 @@ final class CallRecordStoreTest: XCTestCase {
             """
 
             XCTAssertThrowsError(
-                try InMemoryDB.shimOnlyBridge(tx).db.execute(sql: deleteThreadSql)
+                try tx.db.execute(sql: deleteThreadSql)
             ) { error in
                 guard let error = error as? GRDB.DatabaseError else {
                     XCTFail("Unexpected error!")
@@ -390,29 +386,29 @@ final class CallRecordStoreTest: XCTestCase {
         let (interaction6, thread6) = insertThreadAndInteraction()
 
         try inMemoryDB.write { tx in
-            try InMemoryDB.shimOnlyBridge(tx).db.execute(sql: """
+            try tx.db.execute(sql: """
                 INSERT INTO "CallRecord"
-                ( "id", "callId", "interactionRowId", "threadRowId", "type", "direction", "status", "timestamp" )
+                ( "id", "callId", "interactionRowId", "threadRowId", "type", "direction", "status", "callBeganTimestamp", "unreadStatus", "callEndedTimestamp" )
                 VALUES
-                ( 1, 123, \(interaction1), \(thread1), 0, 0, 0, 1701299999 ),
-                ( 2, 1234, \(interaction2), \(thread2), 2, 1, 6, 1701300000 );
+                ( 1, 123, \(interaction1), \(thread1), 0, 0, 0, 1701299999, 0, 0 ),
+                ( 2, 1234, \(interaction2), \(thread2), 2, 1, 6, 1701300000, 0, 0 );
             """)
         }
 
         try inMemoryDB.write { tx in
-            try InMemoryDB.shimOnlyBridge(tx).db.execute(sql: """
+            try tx.db.execute(sql: """
                 INSERT INTO "CallRecord"
-                ( "id", "callId", "interactionRowId", "threadRowId", "type", "direction", "status", "timestamp", "groupCallRingerAci", "unreadStatus" )
+                ( "id", "callId", "interactionRowId", "threadRowId", "type", "direction", "status", "callBeganTimestamp", "groupCallRingerAci", "unreadStatus", "callEndedTimestamp" )
                 VALUES
-                ( 3, 12345, \(interaction3), \(thread3), 2, 0, 8, 1701300001, X'c2459e888a6a474b80fd51a79923fd50', 0 ),
-                ( 4, 123456, \(interaction4), \(thread4), 2, 0, 8, 1701300002, X'227a8eefe8dd45f2a18c3276dc2da653', 1 );
+                ( 3, 12345, \(interaction3), \(thread3), 2, 0, 8, 1701300001, X'c2459e888a6a474b80fd51a79923fd50', 0, 0 ),
+                ( 4, 123456, \(interaction4), \(thread4), 2, 0, 8, 1701300002, X'227a8eefe8dd45f2a18c3276dc2da653', 1, 0 );
             """)
         }
 
         try inMemoryDB.write { tx in
-            try InMemoryDB.shimOnlyBridge(tx).db.execute(sql: """
+            try tx.db.execute(sql: """
                 INSERT INTO "CallRecord"
-                ( "id", "callId", "interactionRowId", "threadRowId", "type", "direction", "status", "timestamp", "groupCallRingerAci", "unreadStatus", "callEndedTimestamp" )
+                ( "id", "callId", "interactionRowId", "threadRowId", "type", "direction", "status", "callBeganTimestamp", "groupCallRingerAci", "unreadStatus", "callEndedTimestamp" )
                 VALUES
                 ( 5, 1234567, \(interaction5), \(thread5), 2, 0, 6, 1701300003, X'c2459e888a6a474b80fd51a79923fd50', 0, 1701300004 ),
                 ( 6, 12345678, \(interaction6), \(thread6), 2, 0, 6, 1701300005, X'227a8eefe8dd45f2a18c3276dc2da653', 0, 1701300006 );
@@ -503,7 +499,7 @@ final class CallRecordStoreTest: XCTestCase {
         ]
 
         try inMemoryDB.read { tx throws in
-            let actualCallRecords = try CallRecord.fetchAll(InMemoryDB.shimOnlyBridge(tx).db)
+            let actualCallRecords = try CallRecord.fetchAll(tx.db)
             XCTAssertEqual(actualCallRecords.count, expectedRecords.count)
 
             for (idx, actualCallRecord) in actualCallRecords.enumerated() {

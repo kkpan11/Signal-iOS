@@ -10,19 +10,20 @@ import XCTest
 final class DeletedCallRecordCleanupManagerTest: XCTestCase {
     private var timeIntervalProvider: DeletedCallRecordCleanupManagerImpl.TimeIntervalProvider = { owsFail("Not implemented!") }
     private var dateProvider: DateProvider = { owsFail("Not implemented!") }
-    private var db: MockDB!
+    private var db: InMemoryDB!
     private var deletedCallRecordStore: MockDeletedCallRecordStore!
     private var testScheduler: TestScheduler!
 
     private var cleanupManager: DeletedCallRecordCleanupManagerImpl!
 
     override func setUp() {
-        db = MockDB()
+        db = InMemoryDB()
         deletedCallRecordStore = MockDeletedCallRecordStore()
         testScheduler = TestScheduler()
 
         cleanupManager = DeletedCallRecordCleanupManagerImpl(
             minimumSecondsBetweenCleanupPasses: { self.timeIntervalProvider() },
+            callLinkStore: CallLinkRecordStoreImpl(),
             dateProvider: { self.dateProvider() },
             db: db,
             deletedCallRecordStore: deletedCallRecordStore,

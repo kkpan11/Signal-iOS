@@ -61,7 +61,7 @@ public final class CallRecord: Codable, PersistableRecord, FetchableRecord {
         case callStatus = "status"
         case unreadStatus
         case groupCallRingerAci
-        case callBeganTimestamp = "timestamp"
+        case callBeganTimestamp
         case callEndedTimestamp
     }
 
@@ -205,6 +205,24 @@ public final class CallRecord: Codable, PersistableRecord, FetchableRecord {
         if let groupCallRingerAci, isGroupRing {
             self.groupCallRingerAci = groupCallRingerAci
         }
+    }
+
+    public init(
+        callId: UInt64,
+        callLinkRowId: Int64,
+        callStatus: CallStatus.CallLinkCallStatus,
+        callBeganTimestamp: UInt64
+    ) {
+        self.callId = callId
+        self.conversationId = .callLink(callLinkRowId: callLinkRowId)
+        self.interactionReference = .none
+        self.callType = .adHocCall
+        self.callDirection = .incoming
+        self.callStatus = .callLink(callStatus)
+        self.unreadStatus = .read
+        self.callBeganTimestamp = callBeganTimestamp
+        self.callEndedTimestamp = 0
+        self.groupCallRingerAci = nil
     }
 
     /// Capture the SQLite row ID for this record, after insertion.

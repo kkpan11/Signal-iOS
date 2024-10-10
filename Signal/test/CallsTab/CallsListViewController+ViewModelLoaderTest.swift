@@ -14,7 +14,7 @@ final class CallsListViewControllerViewModelLoaderTest: XCTestCase {
 
     private var viewModelLoader: ViewModelLoader!
 
-    private var mockDB: MockDB!
+    private var mockDB: InMemoryDB!
     private var mockCallRecordLoader: MockCallRecordLoader!
     private lazy var callViewModelForCallRecords: ViewModelLoader.CallViewModelForCallRecords! = {
         self.createCallViewModel(callRecords: $0, tx: $1)
@@ -27,7 +27,7 @@ final class CallsListViewControllerViewModelLoaderTest: XCTestCase {
         let recipientType: CallViewModel.RecipientType = {
             switch callRecords.first!.callStatus {
             case .individual:
-                return .individual(type: .audio, contactThread: TSContactThread(
+                return .individual(type: .video, contactThread: TSContactThread(
                     contactUUID: UUID().uuidString,
                     contactPhoneNumber: nil
                 ))
@@ -55,6 +55,7 @@ final class CallsListViewControllerViewModelLoaderTest: XCTestCase {
             title: "Hey, I just met you, and this is crazy, but here's my number, so call me maybe?",
             recipientType: recipientType,
             direction: direction,
+            medium: .video,
             state: .inactive
         )
     }
@@ -80,7 +81,7 @@ final class CallsListViewControllerViewModelLoaderTest: XCTestCase {
             switch reference {
             case .callRecords(let primaryId, let coalescedIds):
                 return [primaryId.callId] + coalescedIds.map(\.callId)
-            case .callLink(roomId: _):
+            case .callLink(rowId: _):
                 owsFail("Not implemented.")
             }
         }
@@ -131,7 +132,7 @@ final class CallsListViewControllerViewModelLoaderTest: XCTestCase {
             switch reference {
             case .callRecords(let primaryId, let coalescedIds):
                 actualCallIds = [primaryId.callId] + coalescedIds.map(\.callId)
-            case .callLink(roomId: _):
+            case .callLink(rowId: _):
                 owsFail("Not implemented.")
             }
             XCTAssertEqual(expectedCallIds, actualCallIds)
@@ -140,7 +141,7 @@ final class CallsListViewControllerViewModelLoaderTest: XCTestCase {
     }
 
     override func setUp() {
-        mockDB = MockDB()
+        mockDB = InMemoryDB()
         mockCallRecordLoader = MockCallRecordLoader()
     }
 
@@ -406,52 +407,48 @@ final class CallsListViewControllerViewModelLoaderTest: XCTestCase {
             return defaultFetchCallRecordBlock(callRecordId, tx)
         }
 
-        mockDB.read { tx in
-            let firstViewModelIds: [CallRecord.ID] = [
-                .fixture(callId: 0),
-                .fixture(callId: 1),
-            ]
+        let firstViewModelIds: [CallRecord.ID] = [
+            .fixture(callId: 0),
+            .fixture(callId: 1),
+        ]
 
-            for callRecordId in firstViewModelIds {
-                /// Asking to recreate for either call record ID in a coalesced
-                /// view model should re-fetch all the calls in the view model.
-                XCTAssertEqual(
-                    viewModelLoader.refreshViewModels(
-                        callRecordIds: [callRecordId], tx: tx
-                    ),
-                    [
-                        .callRecords(
-                            primaryId: .fixture(callId: 0),
-                            coalescedIds: [.fixture(callId: 1)]
-                        )
-                    ]
-                )
-                XCTAssertEqual(fetchedCallIds, [0, 1])
-                fetchedCallIds = []
-            }
-
+        for callRecordId in firstViewModelIds {
+            /// Asking to recreate for either call record ID in a coalesced
+            /// view model should re-fetch all the calls in the view model.
             XCTAssertEqual(
-                viewModelLoader.refreshViewModels(callRecordIds: [.fixture(callId: 2)], tx: tx),
-                [.callRecords(primaryId: .fixture(callId: 2), coalescedIds: [])]
+                viewModelLoader.invalidate(callLinkRowIds: [], callRecordIds: [callRecordId]),
+                [
+                    .callRecords(
+                        primaryId: .fixture(callId: 0),
+                        coalescedIds: [.fixture(callId: 1)]
+                    )
+                ]
             )
-            XCTAssertEqual(fetchedCallIds, [2])
+            assertCachedCallIds([0, 1], atLoadedViewModelReferenceIndex: 0)
+            XCTAssertEqual(fetchedCallIds, [0, 1])
             fetchedCallIds = []
         }
+
+        XCTAssertEqual(
+            viewModelLoader.invalidate(callLinkRowIds: [], callRecordIds: [.fixture(callId: 2)]),
+            [.callRecords(primaryId: .fixture(callId: 2), coalescedIds: [])]
+        )
+        assertCachedCallIds([2], atLoadedViewModelReferenceIndex: 1)
+        XCTAssertEqual(fetchedCallIds, [2])
+        fetchedCallIds = []
 
         // Insert an earlier record that doesn't have a CallViewModel.
         mockCallRecordLoader.callRecords.insert(.fixture(callId: 3, timestamp: earlierTimestamp), at: 0)
         XCTAssertTrue(loadMore(direction: .newer))
 
         /// If we ask to recreate for a call record ID that's not part of
-        /// any cached view models, nothing should happen.
+        /// any cached view models, it should be marked for reloading.
         fetchCallRecordBlock = { (_, _) in XCTFail("Unexpectedly tried to fetch!"); return nil }
-        mockDB.read { tx in
-            XCTAssertEqual(
-                viewModelLoader.refreshViewModels(callRecordIds: [.fixture(callId: 3)], tx: tx),
-                []
-            )
-            XCTAssertEqual(fetchedCallIds, [])
-        }
+        XCTAssertEqual(
+            viewModelLoader.invalidate(callLinkRowIds: [], callRecordIds: [.fixture(callId: 3)]),
+            [.callRecords(primaryId: .fixture(callId: 3), coalescedIds: [])]
+        )
+        XCTAssertEqual(fetchedCallIds, [])
     }
 
     func testDroppingViewModels() {

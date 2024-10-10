@@ -15,7 +15,7 @@ class PniDistributionParameterBuilderTest: XCTestCase {
     private var registrationIdGeneratorMock: MockRegistrationIdGenerator!
 
     private var dateProvider: DateProvider!
-    private var db: DB!
+    private var db: (any DB)!
 
     private var pniDistributionParameterBuilder: PniDistributionParameterBuilderImpl!
 
@@ -25,7 +25,7 @@ class PniDistributionParameterBuilderTest: XCTestCase {
         pniSignedPreKeyStoreMock = MockSignalSignedPreKeyStore()
         pniKyberPreKeyStoreMock = MockKyberPreKeyStore(dateProvider: dateProvider)
         registrationIdGeneratorMock = .init()
-        db = MockDB()
+        db = InMemoryDB()
 
         pniDistributionParameterBuilder = PniDistributionParameterBuilderImpl(
             db: db,

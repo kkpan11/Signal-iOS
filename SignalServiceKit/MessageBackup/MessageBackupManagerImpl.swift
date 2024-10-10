@@ -35,7 +35,7 @@ public class MessageBackupManagerImpl: MessageBackupManager {
     private let chatItemArchiver: MessageBackupChatItemArchiver
     private let contactRecipientArchiver: MessageBackupContactRecipientArchiver
     private let dateProvider: DateProvider
-    private let db: DB
+    private let db: any DB
     private let distributionListRecipientArchiver: MessageBackupDistributionListRecipientArchiver
     private let encryptedStreamProvider: MessageBackupEncryptedProtoStreamProvider
     private let groupRecipientArchiver: MessageBackupGroupRecipientArchiver
@@ -60,7 +60,7 @@ public class MessageBackupManagerImpl: MessageBackupManager {
         chatItemArchiver: MessageBackupChatItemArchiver,
         contactRecipientArchiver: MessageBackupContactRecipientArchiver,
         dateProvider: @escaping DateProvider,
-        db: DB,
+        db: any DB,
         distributionListRecipientArchiver: MessageBackupDistributionListRecipientArchiver,
         encryptedStreamProvider: MessageBackupEncryptedProtoStreamProvider,
         groupRecipientArchiver: MessageBackupGroupRecipientArchiver,
@@ -220,13 +220,15 @@ public class MessageBackupManagerImpl: MessageBackupManager {
         localIdentifiers: LocalIdentifiers,
         tx: DBWriteTransaction
     ) throws {
+        let startTimeMs = Date().ows_millisecondsSince1970
+
         try writeHeader(stream: stream, tx: tx)
 
         let currentBackupAttachmentUploadEra: String?
         if MessageBackupMessageAttachmentArchiver.isFreeTierBackup() {
             currentBackupAttachmentUploadEra = nil
         } else {
-            currentBackupAttachmentUploadEra = try MessageBackupMessageAttachmentArchiver.uploadEra()
+            currentBackupAttachmentUploadEra = try MessageBackupMessageAttachmentArchiver.currentUploadEra()
         }
 
         let customChatColorContext = MessageBackup.CustomChatColorArchivingContext(
@@ -375,6 +377,9 @@ public class MessageBackupManagerImpl: MessageBackupManager {
                 try await backupAttachmentUploadManager.backUpAllAttachments()
             }
         }
+
+        let endTimeMs = Date().ows_millisecondsSince1970
+        Logger.info("Exported \(stream.numberOfWrittenFrames) in \(endTimeMs - startTimeMs)ms")
     }
 
     private func writeHeader(stream: MessageBackupProtoOutputStream, tx: DBWriteTransaction) throws {
@@ -481,6 +486,7 @@ public class MessageBackupManagerImpl: MessageBackupManager {
         localIdentifiers: LocalIdentifiers,
         tx: DBWriteTransaction
     ) throws {
+        let startTimeMs = Date().ows_millisecondsSince1970
 
         let backupInfo: BackupProto_BackupInfo
         var hasMoreFrames = false
@@ -504,11 +510,12 @@ public class MessageBackupManagerImpl: MessageBackupManager {
         /// Wraps all the various "contexts" we pass to downstream archivers.
         struct Contexts {
             let chat: MessageBackup.ChatRestoringContext
+            var chatItem: MessageBackup.ChatItemRestoringContext
             let customChatColor: MessageBackup.CustomChatColorRestoringContext
             let recipient: MessageBackup.RecipientRestoringContext
 
             var all: [MessageBackup.RestoringContext] {
-                [chat, customChatColor, recipient]
+                [chat, chatItem, customChatColor, recipient]
             }
 
             init(localIdentifiers: LocalIdentifiers, tx: DBWriteTransaction) {
@@ -520,6 +527,11 @@ public class MessageBackupManagerImpl: MessageBackupManager {
                 chat = MessageBackup.ChatRestoringContext(
                     customChatColorContext: customChatColor,
                     recipientContext: recipient,
+                    tx: tx
+                )
+                chatItem = MessageBackup.ChatItemRestoringContext(
+                    recipientContext: recipient,
+                    chatContext: chat,
                     tx: tx
                 )
             }
@@ -608,7 +620,7 @@ public class MessageBackupManagerImpl: MessageBackupManager {
             case .chatItem(let chatItem):
                 let chatItemResult = chatItemArchiver.restore(
                     chatItem,
-                    context: contexts.chat
+                    context: contexts.chatItem
                 )
                 switch chatItemResult {
                 case .success:
@@ -621,7 +633,8 @@ public class MessageBackupManagerImpl: MessageBackupManager {
             case .account(let backupProtoAccountData):
                 let accountDataResult = accountDataArchiver.restore(
                     backupProtoAccountData,
-                    context: contexts.customChatColor
+                    chatColorsContext: contexts.customChatColor,
+                    chatItemContext: contexts.chatItem
                 )
                 switch accountDataResult {
                 case .success:
@@ -676,6 +689,9 @@ public class MessageBackupManagerImpl: MessageBackupManager {
                 try await backupAttachmentDownloadManager.restoreAttachmentsIfNeeded()
             }
         }
+
+        let endTimeMs = Date().ows_millisecondsSince1970
+        Logger.info("Imported \(stream.numberOfReadFrames) in \(endTimeMs - startTimeMs)ms")
     }
 
     private func processRestoreFrameErrors<IdType>(errors: [MessageBackup.RestoreFrameError<IdType>]) throws {

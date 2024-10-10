@@ -38,7 +38,14 @@ public extension MessageBackup {
 
         public struct DeleteMediaTarget: Codable {
             let cdn: UInt32
-            let mediaId: String
+            let mediaId: Data
+
+            var asParameters: [String: Any] {
+                [
+                    "cdn": self.cdn,
+                    "mediaId": self.mediaId.asBase64Url
+                ]
+            }
         }
     }
 
@@ -135,7 +142,7 @@ public struct MessageBackupRequestManagerImpl: MessageBackupRequestManager {
     }
 
     private let dateProvider: DateProvider
-    private let db: DB
+    private let db: any DB
     private let kvStore: KeyValueStore
     private let messageBackupAuthCredentialManager: MessageBackupAuthCredentialManager
     private let messageBackupKeyMaterial: MessageBackupKeyMaterial
@@ -143,7 +150,7 @@ public struct MessageBackupRequestManagerImpl: MessageBackupRequestManager {
 
     init(
         dateProvider: @escaping DateProvider,
-        db: DB,
+        db: any DB,
         keyValueStoreFactory: KeyValueStoreFactory,
         messageBackupAuthCredentialManager: MessageBackupAuthCredentialManager,
         messageBackupKeyMaterial: MessageBackupKeyMaterial,

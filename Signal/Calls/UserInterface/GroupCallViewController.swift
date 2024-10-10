@@ -38,9 +38,7 @@ class GroupCallViewController: UIViewController {
             confirmationToastManager: callControlsConfirmationToastManager,
             callControlsDelegate: self,
             sheetPanDelegate: self,
-            didPresentViewController: { [weak self] _ in
-                self?.scheduleBottomSheetTimeoutIfNecessary()
-            }
+            callDrawerDelegate: self
         )
     }()
     private lazy var fullscreenLocalMemberAddOnsView = SupplementalCallControlsForFullscreenLocalMember(
@@ -295,6 +293,7 @@ class GroupCallViewController: UIViewController {
         super.init(nibName: nil, bundle: nil)
 
         groupCall.addObserver(self)
+        groupCall.addObserver(AppEnvironment.shared.callLinkProfileKeySharingManager)
 
         NotificationCenter.default.addObserver(
             self,
@@ -320,10 +319,9 @@ class GroupCallViewController: UIViewController {
 
     static func presentLobby(
         for callLink: CallLink,
-        adminPasskey: Data? = nil,
         callLinkStateRetrievalStrategy: CallService.CallLinkStateRetrievalStrategy = .fetch
     ) {
-        guard RemoteConfig.current.callLinkJoin else {
+        guard FeatureFlags.callLinkJoin else {
             return
         }
         self._presentLobby { viewController in
@@ -332,7 +330,6 @@ class GroupCallViewController: UIViewController {
                     let callService = AppEnvironment.shared.callService!
                     return try await callService.buildAndConnectCallLinkCall(
                         callLink: callLink,
-                        adminPasskey: adminPasskey,
                         callLinkStateRetrievalStrategy: callLinkStateRetrievalStrategy
                     )
                 }
@@ -358,10 +355,6 @@ class GroupCallViewController: UIViewController {
             owsFail("Can't start a call if there's no view controller")
         }
 
-        // [CallLink] TODO: Check if `canCancel` should be true.
-        // Gotchas:
-        // - Incoming group calls that are ringing.
-        // - Disconnecting calls that the user cancels.
         ModalActivityIndicatorViewController.present(
             fromViewController: frontmostViewController,
             canCancel: false,
@@ -564,6 +557,13 @@ class GroupCallViewController: UIViewController {
                 )
             }
         }
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(otherUsersProfileChanged(notification:)),
+            name: UserProfileNotifications.otherUsersProfileDidChange,
+            object: nil
+        )
     }
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -855,7 +855,7 @@ class GroupCallViewController: UIViewController {
         if shouldRepositionBottomVStack {
             switch bottomSheetStateManager.bottomSheetState {
             case .callControlsAndOverflow, .callControls, .callInfo, .transitioning:
-                yMax = size.height - bottomSheet.sheetHeight - 16
+                yMax = size.height - bottomSheet.minimizedHeight - 16
             case .hidden:
                 yMax = size.height - 32
             }
@@ -1060,11 +1060,11 @@ class GroupCallViewController: UIViewController {
     }
 
     private var callControlsOverflowBottomConstraintConstant: CGFloat {
-        -self.bottomSheet.sheetHeight - 12
+        -self.bottomSheet.minimizedHeight - 12
     }
 
     private var callControlsConfirmationToastContainerViewBottomConstraintConstant: CGFloat {
-        return -self.bottomSheet.sheetHeight - 16
+        return -self.bottomSheet.minimizedHeight - 16
     }
 
     private func callControlDisplayStateDidChange(
@@ -1409,6 +1409,37 @@ class GroupCallViewController: UIViewController {
         }
 
         callService.callUIAdapter.answerCall(call)
+    }
+
+    // MARK: Profile updates
+
+    @objc
+    private func otherUsersProfileChanged(notification: Notification) {
+        AssertIsOnMainThread()
+
+        guard let changedAddress = notification.userInfo?[UserProfileNotifications.profileAddressKey] as? SignalServiceAddress,
+              changedAddress.isValid else {
+            owsFailDebug("changedAddress was unexpectedly nil")
+            return
+        }
+
+        if let peekInfo = self.ringRtcCall.peekInfo {
+            let joinedAndPendingMembers = peekInfo.joinedMembers + peekInfo.pendingUsers
+
+            if joinedAndPendingMembers.contains(where: { uuid in
+                changedAddress == SignalServiceAddress(Aci(fromUUID: uuid))
+            }) {
+                self.bottomSheet.updateMembers()
+
+                switch self.ringRtcCall.kind {
+                case .signalGroup:
+                    break
+                case .callLink:
+                    // Refresh profiles in call link admin approval UI.
+                    self.callLinkApprovalViewModel.loadRequestsWithSneakyTransaction(for: peekInfo.pendingUsers)
+                }
+            }
+        }
     }
 }
 
@@ -2059,6 +2090,19 @@ extension GroupCallViewController: SheetPanDelegate {
         } else if bottomSheet.isCrossFading() {
             bottomSheetStateManager.submitState(.transitioning)
         }
+    }
+}
+
+// MARK: - CallDrawerDelegate
+
+extension GroupCallViewController: CallDrawerDelegate {
+    func didPresentViewController(_ viewController: UIViewController) {
+        self.scheduleBottomSheetTimeoutIfNecessary()
+    }
+
+    func didTapDone() {
+        bottomSheetStateManager.submitState(.callControls)
+        self.bottomSheet.minimizeHeight()
     }
 }
 

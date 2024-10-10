@@ -26,7 +26,7 @@ public class NicknameRecordStoreImpl: NicknameRecordStore {
     ) -> NicknameRecord? {
         do {
             return try NicknameRecord.fetchOne(
-                SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database,
+                tx.databaseConnection,
                 key: recipientRowID
             )
         } catch {
@@ -41,7 +41,7 @@ public class NicknameRecordStoreImpl: NicknameRecordStore {
     ) -> Bool {
         do {
             return try NicknameRecord.exists(
-                SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database,
+                tx.databaseConnection,
                 key: recipientRowID
             )
         } catch {
@@ -52,7 +52,7 @@ public class NicknameRecordStoreImpl: NicknameRecordStore {
 
     public func enumerateAll(tx: DBReadTransaction, block: (NicknameRecord) -> Void) {
         do {
-            let cursor = try NicknameRecord.fetchCursor(SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database)
+            let cursor = try NicknameRecord.fetchCursor(tx.databaseConnection)
             while let value = try cursor.next() {
                 block(value)
             }
@@ -65,7 +65,7 @@ public class NicknameRecordStoreImpl: NicknameRecordStore {
 
     public func insert(_ nicknameRecord: NicknameRecord, tx: DBWriteTransaction) {
         do {
-            try nicknameRecord.insert(SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database)
+            try nicknameRecord.insert(tx.databaseConnection)
         } catch {
             owsFailDebug("Error inserting nickname record: \(error.grdbErrorForLogging)")
         }
@@ -75,7 +75,7 @@ public class NicknameRecordStoreImpl: NicknameRecordStore {
 
     public func update(_ nicknameRecord: NicknameRecord, tx: DBWriteTransaction) {
         do {
-            try nicknameRecord.update(SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database)
+            try nicknameRecord.update(tx.databaseConnection)
         } catch {
             owsFailDebug("Error updating nickname record: \(error.grdbErrorForLogging)")
         }
@@ -85,7 +85,7 @@ public class NicknameRecordStoreImpl: NicknameRecordStore {
 
     public func delete(_ nicknameRecord: NicknameRecord, tx: DBWriteTransaction) {
         do {
-            try nicknameRecord.delete(SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database)
+            try nicknameRecord.delete(tx.databaseConnection)
         } catch {
             owsFailDebug("Error deleting nickname record: \(error.grdbErrorForLogging)")
         }

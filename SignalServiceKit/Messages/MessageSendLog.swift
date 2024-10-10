@@ -27,11 +27,11 @@ class MessageSendLogObjC: NSObject {
 }
 
 public class MessageSendLog {
-    private let db: DB
+    private let db: any DB
     private let dateProvider: DateProvider
 
     public init(
-        db: DB,
+        db: any DB,
         dateProvider: @escaping DateProvider
     ) {
         self.db = db
@@ -395,7 +395,7 @@ public class MessageSendLog {
             .limit(Constants.cleanupLimit)
         let count = try TimeGatedBatch.processAll(db: db) { tx in
             do {
-                let db = SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database
+                let db = tx.databaseConnection
                 let payloadIds = try fetchRequest.fetchAll(db)
                 try Payload.filter(keys: payloadIds).deleteAll(db)
                 return payloadIds.count

@@ -422,9 +422,9 @@ private enum Constants {
 }
 
 public class JobRecordFinderImpl<JobRecordType>: JobRecordFinder where JobRecordType: JobRecord {
-    private let db: DB
+    private let db: any DB
 
-    public init(db: DB) {
+    public init(db: any DB) {
         self.db = db
     }
 
@@ -494,7 +494,7 @@ public class JobRecordFinderImpl<JobRecordType>: JobRecordFinder where JobRecord
 
     public func fetchJob(rowId: JobRecord.RowId, tx: DBReadTransaction) throws -> JobRecordType? {
         do {
-            let db = SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database
+            let db = tx.databaseConnection
             return try JobRecordType.fetchOne(db, key: rowId)
         } catch {
             throw error.grdbErrorForLogging
@@ -575,7 +575,7 @@ public class JobRecordFinderImpl<JobRecordType>: JobRecordFinder where JobRecord
             LIMIT \(Constants.batchSize)
         """
         do {
-            let db = SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database
+            let db = tx.databaseConnection
             let results = try JobRecordType.fetchAll(db, sql: sql, arguments: arguments)
             return (results, results.count == Constants.batchSize)
         } catch {

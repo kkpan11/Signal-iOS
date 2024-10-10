@@ -32,10 +32,12 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
     // MARK: - Dependencies
 
     private struct Dependencies {
+        let adHocCallRecordManager: any AdHocCallRecordManager
         let badgeManager: BadgeManager
         let blockingManager: BlockingManager
         let callLinkStore: any CallLinkRecordStore
         let callRecordDeleteAllJobQueue: CallRecordDeleteAllJobQueue
+        let callRecordDeleteManager: any CallRecordDeleteManager
         let callRecordMissedCallManager: CallRecordMissedCallManager
         let callRecordQuerier: CallRecordQuerier
         let callRecordStore: CallRecordStore
@@ -43,6 +45,7 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
         let contactsManager: any ContactManager
         let databaseStorage: SDSDatabaseStorage
         let db: any DB
+        let groupCallManager: GroupCallManager
         let interactionDeleteManager: InteractionDeleteManager
         let interactionStore: InteractionStore
         let searchableNameFinder: SearchableNameFinder
@@ -50,11 +53,13 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
         let tsAccountManager: any TSAccountManager
     }
 
-    private lazy var deps: Dependencies = Dependencies(
+    private nonisolated let deps: Dependencies = Dependencies(
+        adHocCallRecordManager: DependenciesBridge.shared.adHocCallRecordManager,
         badgeManager: AppEnvironment.shared.badgeManager,
         blockingManager: SSKEnvironment.shared.blockingManagerRef,
         callLinkStore: DependenciesBridge.shared.callLinkStore,
         callRecordDeleteAllJobQueue: SSKEnvironment.shared.callRecordDeleteAllJobQueueRef,
+        callRecordDeleteManager: DependenciesBridge.shared.callRecordDeleteManager,
         callRecordMissedCallManager: DependenciesBridge.shared.callRecordMissedCallManager,
         callRecordQuerier: DependenciesBridge.shared.callRecordQuerier,
         callRecordStore: DependenciesBridge.shared.callRecordStore,
@@ -62,6 +67,7 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
         contactsManager: NSObject.contactsManager,
         databaseStorage: NSObject.databaseStorage,
         db: DependenciesBridge.shared.db,
+        groupCallManager: NSObject.groupCallManager,
         interactionDeleteManager: DependenciesBridge.shared.interactionDeleteManager,
         interactionStore: DependenciesBridge.shared.interactionStore,
         searchableNameFinder: SearchableNameFinder(
@@ -131,8 +137,18 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
     }
 
     override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
         updateDisplayedDateForAllCallCells()
         clearMissedCallsIfNecessary()
+        isPeekingEnabled = true
+        schedulePeekTimerIfNeeded()
+        peekOnAppear()
+        peekIfPossible()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        isPeekingEnabled = false
     }
 
     override func themeDidChange() {
@@ -254,11 +270,22 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
             return
         }
 
-        let selectedViewModelReferences: [CallViewModel.Reference] = selectedRows.map { idxPath in
-            return viewModelLoader.viewModelReference(at: idxPath.row)
+        let selectedModelReferenceses: [ViewModelLoader.ModelReferences] = selectedRows.map { idxPath in
+            return viewModelLoader.modelReferences(at: idxPath.row)
         }
 
-        deleteCalls(viewModelReferences: selectedViewModelReferences)
+        promptToDeleteMultiple(count: selectedModelReferenceses.count) { [weak self] in
+            do {
+                try await self?.deleteCalls(modelReferenceses: selectedModelReferenceses)
+                self?.presentToast(text: String.localizedStringWithFormat(
+                    Strings.deleteMultipleSuccessFormat,
+                    selectedModelReferenceses.count
+                ))
+            } catch {
+                Logger.warn("\(error)")
+                self?.presentSomeCallLinkDeletionError()
+            }
+        }
     }
 
     // MARK: Call Link Button
@@ -342,7 +369,32 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
             message: Strings.deleteAllCallsPromptMessage,
             proceedTitle: Strings.deleteAllCallsButtonTitle,
             proceedStyle: .destructive
-        ) { _ in
+        ) { [weak self] _ in
+            Task {
+                do {
+                    try await self?.deleteAllCalls()
+                } catch {
+                    Logger.warn("\(error)")
+                    self?.presentSomeCallLinkDeletionError()
+                }
+            }
+        }
+    }
+
+    private func deleteAllCalls() async throws {
+        let callLinksToDelete: [(rootKey: CallLinkRootKey, adminPasskey: Data)]
+        callLinksToDelete = await self.deps.databaseStorage.awaitableWrite { tx in
+            // We might have call links that have never been used. Plus, any call link
+            // for which we're the admin isn't deleted by a "clear all" operation
+            // because they must first be deleted on the server. (We delete them
+            // individually at the end of this method.)
+            let callLinksToDelete: [(rootKey: CallLinkRootKey, adminPasskey: Data)]
+            callLinksToDelete = (try? self.deps.callLinkStore.fetchAll(tx: tx.asV2Read).compactMap {
+                guard let adminPasskey = $0.adminPasskey else {
+                    return nil
+                }
+                return ($0.rootKey, adminPasskey)
+            }) ?? []
             /// Delete-all should use the timestamp of the most-recent call, at
             /// the time the action was initiated, as the timestamp we delete
             /// before (and include in the outgoing sync message).
@@ -354,13 +406,8 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
             /// rather than the most recent call matching our UI state – if the
             /// user does delete-all while filtering to Missed, we still want to
             /// actually delete all.
-            self.deps.databaseStorage.asyncWrite { tx in
-                guard
-                    let mostRecentCallRecord = try? self.deps.callRecordQuerier.fetchCursor(
-                        ordering: .descending, tx: tx.asV2Read
-                    )?.next()
-                else { return }
-
+            let mostRecentCursor = self.deps.callRecordQuerier.fetchCursor(ordering: .descending, tx: tx.asV2Read)
+            if let mostRecentCallRecord = try? mostRecentCursor?.next() {
                 /// This will ultimately post "call records deleted"
                 /// notifications that this view is listening to, so we don't
                 /// need to do any manual UI updates.
@@ -370,7 +417,9 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
                     tx: tx
                 )
             }
+            return callLinksToDelete
         }
+        try await deleteCallLinks(callLinksToDelete: callLinksToDelete)
     }
 
     // MARK: Tab picker
@@ -624,6 +673,8 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
         self.loadCallRecordsAnewCounter += 1
         let loadCallRecordsAnewCounterSnapshot = self.loadCallRecordsAnewCounter
 
+        let isInitialLoad = self.viewModelLoader == nil
+
         deps.databaseStorage.asyncRead(
             block: { tx -> CallRecordLoaderImpl.Configuration in
                 if let searchTerm {
@@ -698,18 +749,17 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
                     callViewModelForCallRecords: { callRecords, tx in
                         return Self.callViewModel(
                             forCallRecords: callRecords,
+                            upcomingCallLinkRowId: nil,
                             deps: capturedDeps,
                             tx: SDSDB.shimOnlyBridge(tx)
                         )
                     },
-                    callViewModelForUpcomingCallLink: { callLinkRecord, tx in
-                        return CallViewModel(
-                            reference: .callLink(roomId: callLinkRecord.roomId),
-                            callRecords: [],
-                            title: callLinkRecord.state?.localizedName ?? "",
-                            recipientType: .callLink(callLinkRecord.rootKey),
-                            direction: .outgoing,
-                            state: .inactive
+                    callViewModelForUpcomingCallLink: { callLinkRowId, tx in
+                        return Self.callViewModel(
+                            forCallRecords: [],
+                            upcomingCallLinkRowId: callLinkRowId,
+                            deps: capturedDeps,
+                            tx: SDSDB.shimOnlyBridge(tx)
                         )
                     },
                     fetchCallRecordBlock: { callRecordId, tx -> CallRecord? in
@@ -730,6 +780,10 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
                     animated: animated,
                     forceUpdateSnapshot: true
                 )
+
+                if isInitialLoad, self.isPeekingEnabled {
+                    self.peekOnAppear()
+                }
             }
         )
     }
@@ -745,9 +799,6 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
     }
 
     private func reloadUpcomingCallLinks() {
-        guard FeatureFlags.callLinkRecordTable else {
-            return
-        }
         deps.db.read { tx in viewModelLoader.reloadUpcomingCallLinkReferences(tx: tx) }
     }
 
@@ -783,20 +834,20 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
     /// thread, direction, missed status, and call type.
     private static func callViewModel(
         forCallRecords callRecords: [CallRecord],
+        upcomingCallLinkRowId: Int64?,
         deps: Dependencies,
         tx: SDSAnyReadTransaction
     ) -> CallViewModel {
-        owsPrecondition(!callRecords.isEmpty)
         owsPrecondition(
-            Set(callRecords.map(\.conversationId)).count == 1,
+            Set(callRecords.map(\.conversationId)).count <= 1,
             "Coalesced call records were for a different conversation than the primary!"
         )
         owsPrecondition(
-            Set(callRecords.map(\.callDirection)).count == 1,
+            Set(callRecords.map(\.callDirection)).count <= 1,
             "Coalesced call records were of a different direction than the primary!"
         )
         owsPrecondition(
-            Set(callRecords.map(\.callStatus.isMissedCall)).count == 1,
+            Set(callRecords.map(\.callStatus.isMissedCall)).count <= 1,
             "Coalesced call records were of a different missed status than the primary!"
         )
         owsPrecondition(
@@ -804,29 +855,53 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
             "Primary and coalesced call records were not ordered descending by timestamp!"
         )
 
-        let mostRecentCallRecord = callRecords.first!
+        let callLinkRecord = { () -> CallLinkRecord? in
+            let callLinkRowId: Int64
+            if let upcomingCallLinkRowId {
+                callLinkRowId = upcomingCallLinkRowId
+            } else if case .callLink(let callLinkRowId2) = callRecords.first!.conversationId {
+                callLinkRowId = callLinkRowId2
+            } else {
+                return nil
+            }
+            do {
+                return try deps.callLinkStore.fetch(rowId: callLinkRowId, tx: tx.asV2Read) ?? {
+                    owsFail("Couldn't load CallLinkRecord that must exist!")
+                }()
+            } catch {
+                owsFail("Couldn't load CallLinkRecord that must exist: \(error)")
+            }
+        }()
 
-        let threadRowId: Int64
-        switch mostRecentCallRecord.conversationId {
-        case .thread(let threadRowId2):
-            threadRowId = threadRowId2
-        case .callLink(_):
-            owsFail("[CallLink] TODO: Add rendering support.")
+        if let callLinkRecord {
+            return CallViewModel(
+                reference: .callLink(rowId: callLinkRecord.id),
+                callRecords: callRecords,
+                title: callLinkRecord.state.localizedName,
+                recipientType: .callLink(callLinkRecord.rootKey),
+                direction: .callLink,
+                medium: .link,
+                state: { () -> CallViewModel.State in
+                    if let activeCallId = callLinkRecord.activeCallId {
+                        if deps.callService.callServiceState.currentCall?.callId == activeCallId {
+                            return .participating
+                        }
+                        return .active
+                    }
+                    return .inactive
+                }()
+            )
         }
 
-        guard let callThread = deps.threadStore.fetchThread(
-            rowId: threadRowId,
-            tx: tx.asV2Read
-        ) else {
-            owsFail("Missing thread for call record! This should be impossible, per the DB schema.")
-        }
+        // If it's not a CallLink, we MUST have at least one CallRecord.
+        let callRecord = callRecords.first!
 
         let callDirection: CallViewModel.Direction = {
-            if mostRecentCallRecord.callStatus.isMissedCall {
+            if callRecord.callStatus.isMissedCall {
                 return .missed
             }
 
-            switch mostRecentCallRecord.callDirection {
+            switch callRecord.callDirection {
             case .incoming: return .incoming
             case .outgoing: return .outgoing
             }
@@ -837,19 +912,18 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
         let callState: CallViewModel.State = {
             let currentCallId: UInt64? = deps.callService.callServiceState.currentCall?.callId
 
-            switch mostRecentCallRecord.callStatus {
+            switch callRecord.callStatus {
             case .individual:
-                if mostRecentCallRecord.callId == currentCallId {
+                if callRecord.callId == currentCallId {
                     // We can have at most one 1:1 call active at a time, and if
                     // we have an active 1:1 call we must be in it. All other
                     // 1:1 calls must have ended.
                     return .participating
                 }
             case .group:
-                guard let groupCallInteraction: OWSGroupCallMessage = deps.interactionStore
-                    .fetchAssociatedInteraction(
-                        callRecord: mostRecentCallRecord, tx: tx.asV2Read
-                    )
+                guard
+                    let groupCallInteraction: OWSGroupCallMessage = deps.interactionStore
+                        .fetchAssociatedInteraction(callRecord: callRecord, tx: tx.asV2Read)
                 else {
                     owsFail("Missing interaction for group call. This should be impossible per the DB schema!")
                 }
@@ -859,52 +933,243 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
                 // leetle wonky that we use the interaction to store that info,
                 // but such is life.
                 if !groupCallInteraction.hasEnded {
-                    if mostRecentCallRecord.callId == currentCallId {
+                    if callRecord.callId == currentCallId {
                         return .participating
                     }
 
                     return .active
                 }
             case .callLink:
-                owsFail("[CallLink] TODO: Handle Call Links.")
+                owsFail("Can't reach this point because we've already handled Call Links.")
             }
 
             return .inactive
         }()
 
         let title: String
+        let medium: CallViewModel.Medium
         let recipientType: CallViewModel.RecipientType
 
-        switch callThread {
-        case let contactThread as TSContactThread:
-            title = deps.contactsManager.displayName(for: contactThread.contactAddress, tx: tx).resolvedValue()
-            let callType: CallViewModel.RecipientType.CallType = {
-                switch mostRecentCallRecord.callType {
+        switch callRecord.conversationId {
+        case .thread(let threadRowId):
+            guard let callThread = deps.threadStore.fetchThread(
+                rowId: threadRowId,
+                tx: tx.asV2Read
+            ) else {
+                owsFail("Missing thread for call record! This should be impossible, per the DB schema.")
+            }
+            switch callThread {
+            case let contactThread as TSContactThread:
+                title = deps.contactsManager.displayName(for: contactThread.contactAddress, tx: tx).resolvedValue()
+                let callType: CallViewModel.RecipientType.IndividualCallType
+                switch callRecords.first!.callType {
                 case .audioCall:
-                    return .audio
+                    medium = .audio
+                    callType = .audio
                 case .adHocCall, .groupCall:
                     owsFailDebug("Had group call type for 1:1 call!")
                     fallthrough
                 case .videoCall:
-                    return .video
+                    medium = .video
+                    callType = .video
                 }
-            }()
-            recipientType = .individual(type: callType, contactThread: contactThread)
-        case let groupThread as TSGroupThread:
-            title = groupThread.groupModel.groupNameOrDefault
-            recipientType = .group(groupThread: groupThread)
-        default:
-            owsFail("Call thread was neither contact nor group! This should be impossible.")
+                recipientType = .individual(type: callType, contactThread: contactThread)
+            case let groupThread as TSGroupThread:
+                title = groupThread.groupModel.groupNameOrDefault
+                medium = .video
+                recipientType = .group(groupThread: groupThread)
+            default:
+                owsFail("Call thread was neither contact nor group! This should be impossible.")
+            }
+        case .callLink(_):
+            owsFail("Can't reach this point because we've already handled Call Links.")
         }
 
         return CallViewModel(
-            reference: .callRecords(primaryId: mostRecentCallRecord.id, coalescedIds: callRecords.dropFirst().map(\.id)),
+            reference: .callRecords(primaryId: callRecord.id, coalescedIds: callRecords.dropFirst().map(\.id)),
             callRecords: callRecords,
             title: title,
             recipientType: recipientType,
             direction: callDirection,
+            medium: medium,
             state: callState
         )
+    }
+
+    // MARK: - Peeking
+
+    /// Fires when active calls should be checked again. Also replenishes
+    /// `peekAllowance`. May be nonnil even when `isPeekingEnabled` is false to
+    /// handle rapid tab switching.
+    private var peekTimer: Timer?
+
+    /// Remaining peeks that can be performed. Replenishes every 30 seconds.
+    private var peekAllowance = 10
+
+    /// If true, call links & active calls should be peeked periodically.
+    private var isPeekingEnabled = false
+
+    /// An ordered list of groups & call links that would be useful to peek.
+    private var peekQueue = [Peekable]()
+
+    /// Identifiers that have been scheduled in this 30 second interval. We
+    /// remove items when `peekTimer` fires to avoid peeking the same values
+    /// repeatedly when scrolling.
+    private var peekQueueIdentifiers = Set<Data>()
+
+    /// Timestamps when call links were recently peeked.
+    private var callLinkPeekDates = [Data: MonotonicDate]()
+
+    private enum Peekable {
+        case groupThread(groupThread: TSGroupThread)
+        case callLink(rootKey: CallLinkRootKey)
+
+        var identifier: Data {
+            switch self {
+            case .groupThread(let thread): thread.groupId
+            case .callLink(let rootKey): rootKey.deriveRoomId()
+            }
+        }
+    }
+
+    /// Schedules a peeks if there's no peek scheduled.
+    private func addToPeekQueue(_ peekable: Peekable) {
+        guard peekQueueIdentifiers.insert(peekable.identifier).inserted else {
+            return
+        }
+        peekQueue.append(peekable)
+        peekIfPossible()
+    }
+
+    /// Peeks `peekAllowance` items from `peekQueue`.
+    ///
+    /// It will often be the case that items added via `addToPeekQueue` are
+    /// peeked immediately. However, if more than 10 items are added, they'll
+    /// queue up until the next 30 second interval.
+    private func peekIfPossible() {
+        guard self.isPeekingEnabled else {
+            return
+        }
+        let peekBatch = self.peekQueue.prefix(peekAllowance)
+        self.peekQueue.removeFirst(peekBatch.count)
+        for peekable in peekBatch {
+            switch peekable {
+            case .groupThread(let thread):
+                Task { [deps] in
+                    await deps.groupCallManager.peekGroupCallAndUpdateThread(thread, peekTrigger: .localEvent())
+                }
+            case .callLink(let rootKey):
+                self.callLinkPeekDates[rootKey.deriveRoomId()] = MonotonicDate()
+                Task { [deps] in
+                    do {
+                        try await Self.peekCallLink(rootKey: rootKey, deps: deps)
+                    } catch {
+                        Logger.warn("\(error)")
+                    }
+                }
+            }
+        }
+        self.peekAllowance -= peekBatch.count
+    }
+
+    private static nonisolated func peekCallLink(rootKey: CallLinkRootKey, deps: Dependencies) async throws {
+        guard let localIdentifiers = deps.tsAccountManager.localIdentifiersWithMaybeSneakyTransaction else {
+            throw OWSGenericError("Not registered.")
+        }
+        let authCredential = try await deps.callService.authCredentialManager.fetchCallLinkAuthCredential(localIdentifiers: localIdentifiers)
+        let eraId = try await deps.callService.callLinkManager.peekCallLink(rootKey: rootKey, authCredential: authCredential)
+        try await deps.db.awaitableWrite { tx in
+            try deps.adHocCallRecordManager.handlePeekResult(eraId: eraId, rootKey: rootKey, tx: tx)
+        }
+    }
+
+    /// Performs the relevant peek steps when the view appears.
+    private func peekOnAppear() {
+        if viewModelLoader == nil {
+            return
+        }
+        if !viewModelLoader.isEmpty, viewModelLoader.viewModels().compacted().isEmpty {
+            _ = viewModelLoader.viewModel(at: 0, sneakyTransactionDb: self.deps.db)
+        }
+        peekActiveCalls()
+        peekInactiveCallLinks()
+    }
+
+    /// Schedules periodic operations: replinishing & active call re-peeking.
+    private func schedulePeekTimerIfNeeded() {
+        if self.peekTimer != nil {
+            return
+        }
+        self.peekTimer = Timer.scheduledTimer(
+            withTimeInterval: 30,
+            repeats: true,
+            block: { [weak self] timer in
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                self.peekAllowance = 10
+                self.peekQueueIdentifiers = Set(self.peekQueue.map(\.identifier))
+                guard self.isPeekingEnabled else {
+                    timer.invalidate()
+                    self.peekTimer = nil
+                    return
+                }
+                self.peekActiveCalls()
+                self.peekIfPossible()
+            }
+        )
+    }
+
+    private func peekActiveCalls() {
+        for viewModel in viewModelLoader.viewModels() {
+            guard let viewModel else {
+                continue
+            }
+            peekIfActive(viewModel)
+        }
+    }
+
+    private func peekIfActive(_ viewModel: CallViewModel) {
+        guard viewModel.state == .active else {
+            return
+        }
+        switch viewModel.recipientType {
+        case .individual:
+            break
+        case .group(groupThread: let groupThread):
+            addToPeekQueue(.groupThread(groupThread: groupThread))
+        case .callLink(let rootKey):
+            addToPeekQueue(.callLink(rootKey: rootKey))
+        }
+    }
+
+    private func peekInactiveCallLinks() {
+        for viewModel in viewModelLoader.viewModels() {
+            guard let viewModel, viewModel.state == .inactive else {
+                continue
+            }
+            switch viewModel.recipientType {
+            case .individual, .group:
+                break
+            case .callLink(let rootKey):
+                // Skip any where the link is more than 10 days old.
+                if
+                    let timestamp = viewModel.callRecords.first?.callBeganTimestamp,
+                    -Date(millisecondsSince1970: timestamp).timeIntervalSinceNow > 10 * kDayInterval
+                {
+                    continue
+                }
+                // Skip any that have been updated in the past 5 minutes.
+                if
+                    let peekDate = callLinkPeekDates[rootKey.deriveRoomId()],
+                    (MonotonicDate() - peekDate) < 300 * NSEC_PER_SEC
+                {
+                    continue
+                }
+                addToPeekQueue(.callLink(rootKey: rootKey))
+            }
+        }
     }
 
     // MARK: - Search term
@@ -961,13 +1226,14 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
     struct CallViewModel {
         enum Reference: Hashable {
             case callRecords(primaryId: CallRecord.ID, coalescedIds: [CallRecord.ID])
-            case callLink(roomId: Data)
+            case callLink(rowId: Int64)
         }
 
         enum Direction {
             case outgoing
             case incoming
             case missed
+            case callLink
 
             var label: String {
                 switch self {
@@ -977,8 +1243,16 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
                     return Strings.callDirectionLabelIncoming
                 case .missed:
                     return Strings.callDirectionLabelMissed
+                case .callLink:
+                    return CallStrings.callLink
                 }
             }
+        }
+
+        enum Medium {
+            case audio
+            case video
+            case link
         }
 
         enum State {
@@ -991,11 +1265,11 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
         }
 
         enum RecipientType {
-            case individual(type: CallType, contactThread: TSContactThread)
+            case individual(type: IndividualCallType, contactThread: TSContactThread)
             case group(groupThread: TSGroupThread)
             case callLink(CallLinkRootKey)
 
-            enum CallType {
+            enum IndividualCallType {
                 case audio
                 case video
             }
@@ -1007,6 +1281,7 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
         let title: String
         let recipientType: RecipientType
         let direction: Direction
+        let medium: Medium
         let state: State
 
         init(
@@ -1015,6 +1290,7 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
             title: String,
             recipientType: RecipientType,
             direction: Direction,
+            medium: Medium,
             state: State
         ) {
             self.reference = reference
@@ -1022,23 +1298,13 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
             self.title = title
             self.recipientType = recipientType
             self.direction = direction
+            self.medium = medium
             self.state = state
-        }
-
-        var callType: RecipientType.CallType {
-            switch recipientType {
-            case let .individual(callType, _):
-                return callType
-            case .group(_):
-                return .video
-            case .callLink(_):
-                return .video
-            }
         }
 
         var isMissed: Bool {
             switch direction {
-            case .outgoing, .incoming:
+            case .outgoing, .incoming, .callLink:
                 return false
             case .missed:
                 return true
@@ -1082,6 +1348,8 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
                 callCell.delegate = self
                 callCell.viewModel = viewModel
 
+                self.peekIfActive(viewModel)
+
                 return callCell
             }
             owsFailDebug("Missing cached view model – how did this happen?")
@@ -1112,16 +1380,12 @@ class CallsListViewController: OWSViewController, HomeTabViewController, CallSer
 
     /// Reload any rows containing one of the given call record IDs.
     private func reloadRows(callRecordIds callRecordIdsToReload: [CallRecord.ID]) {
-        /// Recreate the view models, so when the data source reloads the rows
+        /// Invalidate the view models, so when the data source reloads the rows,
         /// it'll reflect the new underlying state for that row.
-        ///
-        /// This step will also drop any IDs for models that are not currently
-        /// loaded, which should not be included in the snapshot.
-        let referencesToReload = deps.db.read { tx -> [CallViewModel.Reference] in
-            return viewModelLoader.refreshViewModels(
-                callRecordIds: callRecordIdsToReload, tx: tx
-            )
-        }
+        let referencesToReload = viewModelLoader.invalidate(
+            callLinkRowIds: [],
+            callRecordIds: Set(callRecordIdsToReload)
+        )
 
         if DebugFlags.internalLogging {
             logger.info("Reloading \(referencesToReload.count) rows.")
@@ -1366,9 +1630,7 @@ extension CallsListViewController: UITableViewDelegate {
             break
         }
 
-        guard let viewModel = viewModelWithSneakyTransaction(at: indexPath) else {
-            return nil
-        }
+        let modelReferences = viewModelLoader.modelReferences(at: indexPath.row)
 
         let deleteAction = makeContextualAction(
             style: .destructive,
@@ -1376,7 +1638,7 @@ extension CallsListViewController: UITableViewDelegate {
             image: "trash-fill",
             title: CommonStrings.deleteButton
         ) { [weak self] in
-            self?.deleteCalls(viewModelReferences: [viewModel.reference])
+            self?.promptToDeleteCallIfNeeded(modelReferences: modelReferences)
         }
 
         return .init(actions: [deleteAction])
@@ -1413,6 +1675,7 @@ extension CallsListViewController: UITableViewDelegate {
         guard let viewModel = viewModelWithSneakyTransaction(at: indexPath) else {
             return nil
         }
+        let modelReferences = viewModelLoader.modelReferences(at: indexPath.row)
 
         var actions = [UIAction]()
 
@@ -1420,11 +1683,12 @@ extension CallsListViewController: UITableViewDelegate {
         case .active:
             let joinCallTitle: String
             let joinCallIconName: String
-            switch viewModel.callType {
+            switch viewModel.medium {
             case .audio:
                 joinCallTitle = Strings.joinVoiceCallActionTitle
                 joinCallIconName = Theme.iconName(.contextMenuVoiceCall)
-            case .video:
+            case .video, .link:
+                // [CallLink] TODO: Use "Start Call" instead of "Start Video Call".
                 joinCallTitle = Strings.joinVideoCallActionTitle
                 joinCallIconName = Theme.iconName(.contextMenuVideoCall)
             }
@@ -1438,10 +1702,10 @@ extension CallsListViewController: UITableViewDelegate {
             actions.append(joinCallAction)
         case .participating:
             let returnToCallIconName: String
-            switch viewModel.callType {
+            switch viewModel.medium {
             case .audio:
                 returnToCallIconName = Theme.iconName(.contextMenuVoiceCall)
-            case .video:
+            case .video, .link:
                 returnToCallIconName = Theme.iconName(.contextMenuVideoCall)
             }
             let returnToCallAction = UIAction(
@@ -1513,7 +1777,7 @@ extension CallsListViewController: UITableViewDelegate {
                 image: Theme.iconImage(.contextMenuDelete),
                 attributes: .destructive
             ) { [weak self] _ in
-                self?.deleteCalls(viewModelReferences: [viewModel.reference])
+                self?.promptToDeleteCallIfNeeded(modelReferences: modelReferences)
             }
             actions.append(deleteAction)
         case .participating:
@@ -1559,32 +1823,140 @@ extension CallsListViewController: CallCellDelegate, NewCallViewControllerDelega
         }
     }
 
-    private func deleteCalls(viewModelReferences: [CallViewModel.Reference]) {
-        deps.databaseStorage.asyncWrite { tx in
-            let callRecordIdsToDelete: [CallRecord.ID] = viewModelReferences.flatMap { reference in
-                switch reference {
-                case .callRecords(let primaryId, let coalescedIds):
-                    return [primaryId] + coalescedIds
-                case .callLink(_):
-                    // [CallLink] TODO: Implement real deletion incl. sync messages.
-                    owsFail("[CallLink] TODO: Add deletion support")
+    private func promptToDeleteMultiple(count: Int, proceedAction: @escaping @MainActor () async -> Void) {
+        OWSActionSheets.showConfirmationAlert(
+            title: String.localizedStringWithFormat(Strings.deleteMultipleTitleFormat, count),
+            message: Strings.deleteMultipleMessage,
+            proceedTitle: Strings.deleteCallActionTitle,
+            proceedStyle: .destructive,
+            proceedAction: { _ in Task { await proceedAction() } },
+            fromViewController: self
+        )
+    }
+
+    private func presentSomeCallLinkDeletionError() {
+        let actionSheet = ActionSheetController(message: Strings.deleteMultipleError)
+        actionSheet.addAction(OWSActionSheets.okayAction)
+        self.presentActionSheet(actionSheet)
+    }
+
+    private func promptToDeleteCallIfNeeded(modelReferences: ViewModelLoader.ModelReferences) {
+        // If we're the admin for this link, we need to show a warning that other
+        // people won't be able to use it.
+        if isAdmin(forCallLinkRowId: modelReferences.callLinkRowId) {
+            CallLinkDeleter.promptToDelete(fromViewController: self) { [weak self] in
+                do {
+                    try await self?.deleteCalls(modelReferenceses: [modelReferences])
+                    self?.presentToast(text: CallLinkDeleter.successText)
+                } catch {
+                    Logger.warn("\(error)")
+                    self?.presentToast(text: CallLinkDeleter.failureText)
                 }
             }
+        } else {
+            // Otherwise, we can just delete it.
+            Task {
+                do {
+                    try await self.deleteCalls(modelReferenceses: [modelReferences])
+                } catch {
+                    owsFailDebug("\(error)")
+                }
+            }
+        }
+    }
 
-            let callRecordsToDelete = callRecordIdsToDelete.compactMap { callRecordId -> CallRecord? in
-                return self.deps.callRecordStore.fetch(
-                    callRecordId: callRecordId, tx: tx
-                ).unwrapped
+    private func isAdmin(forCallLinkRowId callLinkRowId: Int64?) -> Bool {
+        return deps.databaseStorage.read { tx in
+            guard let callLinkRowId else {
+                return false
+            }
+            do {
+                let callLinkRecord = try self.deps.callLinkStore.fetch(rowId: callLinkRowId, tx: tx.asV2Read) ?? {
+                    throw OWSAssertionError("Couldn't fetch CallLink that must exist.")
+                }()
+                return callLinkRecord.adminPasskey != nil
+            } catch {
+                owsFailDebug("\(error)")
+                return false
+            }
+        }
+    }
+
+    private func deleteCalls(modelReferenceses: [ViewModelLoader.ModelReferences]) async throws {
+        let callLinksToDelete: [(rootKey: CallLinkRootKey, adminPasskey: Data)]
+
+        // First, delete everything that's local only. This includes thread-based
+        // calls & any call link calls for which we're not the admin. These
+        // deletions never fail (except for db corruption-level failures).
+        callLinksToDelete = try await deps.databaseStorage.awaitableWrite { tx in
+            var callLinksToDelete = [(rootKey: CallLinkRootKey, adminPasskey: Data)]()
+            var callRecordIdsWithInteractions = [CallRecord.ID]()
+            for modelReferences in modelReferenceses {
+                if let callLinkRowId = modelReferences.callLinkRowId {
+                    let callLinkRecord = try self.deps.callLinkStore.fetch(rowId: callLinkRowId, tx: tx.asV2Read) ?? {
+                        throw OWSAssertionError("Couldn't fetch CallLink that must exist.")
+                    }()
+                    if let adminPasskey = callLinkRecord.adminPasskey {
+                        callLinksToDelete.append((callLinkRecord.rootKey, adminPasskey))
+                    } else {
+                        try self.deleteCallRecords(forCallLinkRowId: callLinkRecord.id, tx: tx.asV2Write)
+                    }
+                } else {
+                    callRecordIdsWithInteractions.append(contentsOf: modelReferences.callRecordRowIds)
+                }
+            }
+            let callRecordsWithInteractions = callRecordIdsWithInteractions.compactMap { callRecordId -> CallRecord? in
+                return self.deps.callRecordStore.fetch(callRecordId: callRecordId, tx: tx).unwrapped
             }
 
             /// Deleting these call records will trigger a ``CallRecordStoreNotification``,
             /// which we're listening for in this view and will in turn lead us
             /// to update the UI as appropriate.
             self.deps.interactionDeleteManager.delete(
-                alongsideAssociatedCallRecords: callRecordsToDelete,
+                alongsideAssociatedCallRecords: callRecordsWithInteractions,
                 sideEffects: .default(),
                 tx: tx.asV2Write
             )
+
+            return callLinksToDelete
+        }
+
+        // Then, delete any call links we found for which we're the admin. Each of
+        // these may independently fail.
+        try await deleteCallLinks(callLinksToDelete: callLinksToDelete)
+    }
+
+    private nonisolated func deleteCallRecords(forCallLinkRowId callLinkRowId: Int64, tx: DBWriteTransaction) throws {
+        let callRecords = try deps.callRecordStore.fetchExisting(conversationId: .callLink(callLinkRowId: callLinkRowId), limit: nil, tx: tx)
+        deps.callRecordDeleteManager.deleteCallRecords(callRecords, sendSyncMessageOnDelete: true, tx: tx)
+    }
+
+    private func deleteCallLinks(callLinksToDelete: [(rootKey: CallLinkRootKey, adminPasskey: Data)]) async throws {
+        let callLinkStateUpdater = deps.callService.callLinkStateUpdater
+        try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+            for callLinkToDelete in callLinksToDelete {
+                taskGroup.addTask {
+                    try await CallLinkDeleter.deleteCallLink(
+                        stateUpdater: callLinkStateUpdater,
+                        storageServiceManager: NSObject.storageServiceManager,
+                        rootKey: callLinkToDelete.rootKey,
+                        adminPasskey: callLinkToDelete.adminPasskey
+                    )
+                }
+            }
+            var anyError: (any Error)?
+            while let result = await taskGroup.nextResult() {
+                switch result {
+                case .success:
+                    break
+                case .failure(let error):
+                    Logger.warn("Couldn't delete call link: \(error)")
+                    anyError = error
+                }
+            }
+            if let anyError {
+                throw anyError
+            }
         }
     }
 
@@ -1596,14 +1968,7 @@ extension CallsListViewController: CallCellDelegate, NewCallViewControllerDelega
     // MARK: CallCellDelegate
 
     fileprivate func joinCall(from viewModel: CallViewModel) {
-        guard case let .group(groupThread) = viewModel.recipientType else {
-            owsFailBeta("Individual call should not be showing a join button")
-            return
-        }
-        CallStarter(
-            groupThread: groupThread,
-            context: self.callStarterContext
-        ).startCall(from: self)
+        startCall(from: viewModel)
     }
 
     fileprivate func returnToCall(from viewModel: CallViewModel) {
@@ -1616,13 +1981,13 @@ extension CallsListViewController: CallCellDelegate, NewCallViewControllerDelega
 
         switch viewModel.recipientType {
         case .individual(type: _, let thread as TSThread), .group(let thread as TSThread):
-            showCallInfo(for: thread, callRecords: viewModel.callRecords)
-        case .callLink(_):
-            owsFail("[CallLink] TODO: Show CallLink details.")
+            showCallInfo(forThread: thread, callRecords: viewModel.callRecords)
+        case .callLink(let rootKey):
+            showCallInfo(forRootKey: rootKey, callRecords: viewModel.callRecords)
         }
     }
 
-    private func showCallInfo(for thread: TSThread, callRecords: [CallRecord]) {
+    private func showCallInfo(forThread thread: TSThread, callRecords: [CallRecord]) {
         let (threadViewModel, isSystemContact) = deps.databaseStorage.read { tx in
             let threadViewModel = ThreadViewModel(
                 thread: thread,
@@ -1644,8 +2009,25 @@ extension CallsListViewController: CallCellDelegate, NewCallViewControllerDelega
             callRecords: callRecords
         )
 
-        callDetailsView.hidesBottomBarWhenPushed = true
-        navigationController?.pushViewController(callDetailsView, animated: true)
+        showCallInfo(viewController: callDetailsView)
+    }
+
+    private func showCallInfo(forRootKey rootKey: CallLinkRootKey, callRecords: [CallRecord]) {
+        let callLinkRecord = deps.db.read { tx -> CallLinkRecord in
+            do {
+                return try deps.callLinkStore.fetch(roomId: rootKey.deriveRoomId(), tx: tx) ?? {
+                    owsFail("Can't fetch CallLinkRecord that must exist.")
+                }()
+            } catch {
+                owsFail("Can't fetch CallLinkRecord: \(error)")
+            }
+        }
+        showCallInfo(viewController: CallLinkViewController.forExisting(callLinkRecord: callLinkRecord, callRecords: callRecords))
+    }
+
+    private func showCallInfo(viewController: UIViewController) {
+        viewController.hidesBottomBarWhenPushed = true
+        navigationController?.pushViewController(viewController, animated: true)
     }
 
     // MARK: NewCallViewControllerDelegate
@@ -1686,7 +2068,19 @@ extension CallsListViewController: DatabaseChangeDelegate {
         reloadAllRows()
     }
 
-    func databaseChangesDidUpdate(databaseChanges: DatabaseChanges) {}
+    func databaseChangesDidUpdate(databaseChanges: DatabaseChanges) {
+        guard let rowIds = databaseChanges.tableRowIds[CallLinkRecord.databaseTableName] else {
+            return
+        }
+        reloadUpcomingCallLinks()
+        let updatedReferences = viewModelLoader.invalidate(callLinkRowIds: rowIds, callRecordIds: [])
+        var snapshot = getSnapshot()
+        snapshot.reloadItems(updatedReferences.map { .callViewModelReference($0) })
+        dataSource.apply(snapshot, animatingDifferences: true)
+        updateEmptyStateMessage()
+        cancelMultiselectIfEmpty()
+    }
+
     func databaseChangesDidReset() {}
 }
 
@@ -1745,10 +2139,10 @@ private extension CallsListViewController {
             guard let viewModel else { return nil }
 
             let icon: UIImage
-            switch viewModel.callType {
+            switch viewModel.medium {
             case .audio:
                 icon = Theme.iconImage(.phoneFill16)
-            case .video:
+            case .video, .link:
                 icon = Theme.iconImage(.videoFill16)
             }
 
@@ -1907,8 +2301,7 @@ private extension CallsListViewController {
                 case .individual(type: _, let thread as TSThread), .group(let thread as TSThread):
                     configuration.dataSource = .thread(thread)
                 case .callLink(_):
-                    // [CallLink] TODO: Show the Call Link icon.
-                    configuration.dataSource = .none
+                    configuration.dataSource = .asset(avatar: CommonCallLinksUI.callLinkIcon(), badge: nil)
                 }
             }
 
@@ -1922,7 +2315,7 @@ private extension CallsListViewController {
             self.titleLabel.text = titleText
 
             switch viewModel.direction {
-            case .incoming, .outgoing:
+            case .incoming, .outgoing, .callLink:
                 titleLabel.textColor = Theme.primaryTextColor
             case .missed:
                 titleLabel.textColor = .ows_accentRed
@@ -1930,11 +2323,13 @@ private extension CallsListViewController {
 
             self.subtitleLabel.attributedText = {
                 let icon: ThemeIcon
-                switch viewModel.callType {
+                switch viewModel.medium {
                 case .audio:
                     icon = .phone16
                 case .video:
                     icon = .video16
+                case .link:
+                    icon = .link16
                 }
 
                 return .composed(of: [

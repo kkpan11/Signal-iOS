@@ -10,7 +10,7 @@ import XCTest
 final class CallRecordDeleteManagerTest: XCTestCase {
     private var mockCallRecordStore: MockCallRecordStore!
     private var mockOutgoingCallEventSyncMessageManager: MockOutgoingCallEventSyncMessageManager!
-    private var mockDB: MockDB!
+    private var mockDB: InMemoryDB!
     private var mockDeletedCallRecordCleanupManager: MockDeletedCallRecordCleanupManager!
     private var mockDeletedCallRecordStore: MockDeletedCallRecordStore!
     private var mockThreadStore: MockThreadStore!
@@ -18,7 +18,7 @@ final class CallRecordDeleteManagerTest: XCTestCase {
     private var deleteManager: CallRecordDeleteManagerImpl!
 
     override func setUp() {
-        mockDB = MockDB()
+        mockDB = InMemoryDB()
         mockCallRecordStore = MockCallRecordStore()
         mockOutgoingCallEventSyncMessageManager = {
             let mock = MockOutgoingCallEventSyncMessageManager()
@@ -101,8 +101,8 @@ final class CallRecordDeleteManagerTest: XCTestCase {
         XCTAssertEqual(mockDeletedCallRecordStore.deletedCallRecords.count, 0)
 
         mockDB.write { tx in
-            deleteManager.deleteCallRecord(
-                individualCallRecord1,
+            deleteManager.deleteCallRecords(
+                [individualCallRecord1],
                 sendSyncMessageOnDelete: false,
                 tx: tx
             )
@@ -111,8 +111,8 @@ final class CallRecordDeleteManagerTest: XCTestCase {
             XCTAssertEqual(mockDeletedCallRecordStore.deletedCallRecords.count, 1)
             XCTAssertEqual(mockDeletedCallRecordCleanupManager.cleanupStartCount, 1)
 
-            deleteManager.deleteCallRecord(
-                individualCallRecord2,
+            deleteManager.deleteCallRecords(
+                [individualCallRecord2],
                 sendSyncMessageOnDelete: true,
                 tx: tx
             )
@@ -121,8 +121,8 @@ final class CallRecordDeleteManagerTest: XCTestCase {
             XCTAssertEqual(mockDeletedCallRecordStore.deletedCallRecords.count, 2)
             XCTAssertEqual(mockDeletedCallRecordCleanupManager.cleanupStartCount, 2)
 
-            deleteManager.deleteCallRecord(
-                groupCallRecord1,
+            deleteManager.deleteCallRecords(
+                [groupCallRecord1],
                 sendSyncMessageOnDelete: false,
                 tx: tx
             )
@@ -131,8 +131,8 @@ final class CallRecordDeleteManagerTest: XCTestCase {
             XCTAssertEqual(mockDeletedCallRecordCleanupManager.cleanupStartCount, 3)
             XCTAssertEqual(mockDeletedCallRecordStore.deletedCallRecords.count, 3)
 
-            deleteManager.deleteCallRecord(
-                groupCallRecord2,
+            deleteManager.deleteCallRecords(
+                [groupCallRecord2],
                 sendSyncMessageOnDelete: true,
                 tx: tx
             )

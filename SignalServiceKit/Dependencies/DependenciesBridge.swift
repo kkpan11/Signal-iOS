@@ -39,6 +39,7 @@ public class DependenciesBridge {
     }
 
     public let accountAttributesUpdater: AccountAttributesUpdater
+    public let adHocCallRecordManager: any AdHocCallRecordManager
     public let appExpiry: AppExpiry
     public let attachmentCloner: SignalAttachmentCloner
     public let attachmentContentValidator: AttachmentContentValidator
@@ -56,7 +57,7 @@ public class DependenciesBridge {
     public let backupAttachmentUploadManager: BackupAttachmentUploadManager
     public let badgeCountFetcher: BadgeCountFetcher
     public let callLinkStore: any CallLinkRecordStore
-    let callRecordDeleteManager: any CallRecordDeleteManager
+    public let callRecordDeleteManager: any CallRecordDeleteManager
     public let callRecordMissedCallManager: CallRecordMissedCallManager
     public let callRecordQuerier: CallRecordQuerier
     public let callRecordStore: CallRecordStore
@@ -64,7 +65,7 @@ public class DependenciesBridge {
     public let chatColorSettingStore: ChatColorSettingStore
     public let contactShareManager: ContactShareManager
     public let currentCallProvider: any CurrentCallProvider
-    public let db: DB
+    public let db: any DB
     public let deletedCallRecordCleanupManager: DeletedCallRecordCleanupManager
     let deletedCallRecordStore: DeletedCallRecordStore
     let deleteForMeIncomingSyncMessageManager: DeleteForMeIncomingSyncMessageManager
@@ -102,6 +103,7 @@ public class DependenciesBridge {
     public let messageBackupManager: MessageBackupManager
     public let messageStickerManager: MessageStickerManager
     public let nicknameManager: any NicknameManager
+    public let orphanedBackupAttachmentManager: OrphanedBackupAttachmentManager
     public let orphanedAttachmentCleaner: OrphanedAttachmentCleaner
     public let archivedPaymentStore: ArchivedPaymentStore
     public let phoneNumberDiscoverabilityManager: PhoneNumberDiscoverabilityManager
@@ -152,6 +154,7 @@ public class DependenciesBridge {
 
     init(
         accountAttributesUpdater: AccountAttributesUpdater,
+        adHocCallRecordManager: any AdHocCallRecordManager,
         appExpiry: AppExpiry,
         attachmentCloner: SignalAttachmentCloner,
         attachmentContentValidator: AttachmentContentValidator,
@@ -178,7 +181,7 @@ public class DependenciesBridge {
         chatConnectionManager: ChatConnectionManager,
         contactShareManager: ContactShareManager,
         currentCallProvider: any CurrentCallProvider,
-        db: DB,
+        db: any DB,
         deletedCallRecordCleanupManager: DeletedCallRecordCleanupManager,
         deletedCallRecordStore: DeletedCallRecordStore,
         deleteForMeIncomingSyncMessageManager: DeleteForMeIncomingSyncMessageManager,
@@ -216,6 +219,7 @@ public class DependenciesBridge {
         messageBackupManager: MessageBackupManager,
         messageStickerManager: MessageStickerManager,
         nicknameManager: any NicknameManager,
+        orphanedBackupAttachmentManager: OrphanedBackupAttachmentManager,
         orphanedAttachmentCleaner: OrphanedAttachmentCleaner,
         archivedPaymentStore: ArchivedPaymentStore,
         phoneNumberDiscoverabilityManager: PhoneNumberDiscoverabilityManager,
@@ -264,6 +268,7 @@ public class DependenciesBridge {
         wallpaperStore: WallpaperStore
     ) {
         self.accountAttributesUpdater = accountAttributesUpdater
+        self.adHocCallRecordManager = adHocCallRecordManager
         self.appExpiry = appExpiry
         self.attachmentCloner = attachmentCloner
         self.attachmentContentValidator = attachmentContentValidator
@@ -327,6 +332,7 @@ public class DependenciesBridge {
         self.messageBackupManager = messageBackupManager
         self.messageStickerManager = messageStickerManager
         self.nicknameManager = nicknameManager
+        self.orphanedBackupAttachmentManager = orphanedBackupAttachmentManager
         self.orphanedAttachmentCleaner = orphanedAttachmentCleaner
         self.archivedPaymentStore = archivedPaymentStore
         self.phoneNumberDiscoverabilityManager = phoneNumberDiscoverabilityManager

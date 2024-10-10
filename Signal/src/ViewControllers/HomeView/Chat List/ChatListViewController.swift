@@ -8,7 +8,6 @@ public import SignalUI
 import StoreKit
 
 public class ChatListViewController: OWSViewController, HomeTabViewController {
-
     let appReadiness: AppReadinessSetter
 
     init(
@@ -35,7 +34,12 @@ public class ChatListViewController: OWSViewController, HomeTabViewController {
 
     // MARK: View Lifecycle
 
-    private lazy var filterControl = ChatListFilterControl()
+    private lazy var filterControl: ChatListFilterControl? = if FeatureFlags.chatListFilter {
+        ChatListFilterControl()
+    } else {
+        nil
+    }
+    private var filterControlNeedsSizeChange = true
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -61,8 +65,12 @@ public class ChatListViewController: OWSViewController, HomeTabViewController {
         tableView.estimatedRowHeight = 60
         tableView.allowsSelectionDuringEditing = true
         tableView.allowsMultipleSelectionDuringEditing = true
-        tableView.tableHeaderView = filterControl
-        filterControl.delegate = self
+
+        if let filterControl {
+            tableView.tableHeaderView = filterControl
+            filterControl.clearAction = .disableChatListFilter(target: self)
+            filterControl.delegate = self
+        }
 
         // Empty Inbox
         view.addSubview(emptyInboxView)
@@ -241,9 +249,16 @@ public class ChatListViewController: OWSViewController, HomeTabViewController {
             CGFloat(0.0)
         }
 
-        if !hasEverAppeared {
-            filterControl.sizeToFit()
-            updateFilterControl(animated: false)
+        if let filterControl {
+            if filterControlNeedsSizeChange {
+                let searchBarHeight = searchBar.systemLayoutSizeFitting(UIView.layoutFittingExpandedSize).height
+                filterControl.frame.size = CGSize(width: tableView.bounds.width, height: searchBarHeight)
+                filterControlNeedsSizeChange = false
+            }
+
+            if !hasEverAppeared {
+                updateFilterControl(animated: false)
+            }
         }
 
         if tableView.contentInset.bottom != bottomInset {
@@ -309,6 +324,17 @@ public class ChatListViewController: OWSViewController, HomeTabViewController {
                     getStartedBanner.view.alpha = 1
                 }
             }
+        }
+    }
+
+    public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+
+        if traitCollection.preferredContentSizeCategory != previousTraitCollection?.preferredContentSizeCategory {
+            // The filter control needs to match the size of the search bar, which
+            // changes depending on dynamic type. Set a flag so that we can
+            // calculate the new search bar size in `viewDidLayoutSubviews()`.
+            filterControlNeedsSizeChange = true
         }
     }
 
@@ -1341,13 +1367,13 @@ extension ChatListViewController {
         updateChatListFilter(.unread)
         updateBarButtonItems()
 
-        if filterControl.isFiltering {
+        if filterControl?.isFiltering == true {
             // No need to update the filter control if it's already in the
             // filtering state.
             loadCoordinator.loadIfNecessary()
         } else {
             tableView.performBatchUpdates { [self] in
-                filterControl.startFiltering(animated: true)
+                filterControl?.startFiltering(animated: true)
                 loadCoordinator.loadIfNecessary()
             }
         }
@@ -1357,12 +1383,13 @@ extension ChatListViewController {
         updateChatListFilter(.none)
         updateBarButtonItems()
         tableView.performBatchUpdates { [self] in
-            filterControl.stopFiltering(animated: true)
+            filterControl?.stopFiltering(animated: true)
             loadCoordinator.loadIfNecessary()
         }
     }
 
     private func updateFilterControl(animated: Bool) {
+        guard let filterControl else { return }
         if viewState.inboxFilter == .unread {
             filterControl.startFiltering(animated: animated)
         } else {
@@ -1655,11 +1682,16 @@ extension ChatListViewController: UIScrollViewDelegate {
     }
 
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        filterControl.updateScrollPosition(in: scrollView)
+        filterControl?.updateScrollPosition(in: scrollView)
     }
 
     public func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
-        filterControl.draggingWillEnd(in: scrollView)
+        filterControl?.draggingWillEnd(in: scrollView)
+    }
+
+    public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        guard FeatureFlags.chatListFilter else { return }
+        filterControl?.scrollingDidStop(in: scrollView)
     }
 }
 

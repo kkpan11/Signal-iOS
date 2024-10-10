@@ -39,11 +39,12 @@ public protocol AttachmentUploadManager {
 public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
 
     private let attachmentEncrypter: Upload.Shims.AttachmentEncrypter
-    private let attachmentStore: AttachmentUploadStore
+    private let attachmentStore: AttachmentStore
+    private let attachmentUploadStore: AttachmentUploadStore
     private let attachmentThumbnailService: AttachmentThumbnailService
     private let chatConnectionManager: ChatConnectionManager
     private let dateProvider: DateProvider
-    private let db: DB
+    private let db: any DB
     private let fileSystem: Upload.Shims.FileSystem
     private let interactionStore: InteractionStore
     private let messageBackupKeyMaterial: MessageBackupKeyMaterial
@@ -72,11 +73,12 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
 
     public init(
         attachmentEncrypter: Upload.Shims.AttachmentEncrypter,
-        attachmentStore: AttachmentUploadStore,
+        attachmentStore: AttachmentStore,
+        attachmentUploadStore: AttachmentUploadStore,
         attachmentThumbnailService: AttachmentThumbnailService,
         chatConnectionManager: ChatConnectionManager,
         dateProvider: @escaping DateProvider,
-        db: DB,
+        db: any DB,
         fileSystem: Upload.Shims.FileSystem,
         interactionStore: InteractionStore,
         messageBackupKeyMaterial: MessageBackupKeyMaterial,
@@ -87,6 +89,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
     ) {
         self.attachmentEncrypter = attachmentEncrypter
         self.attachmentStore = attachmentStore
+        self.attachmentUploadStore = attachmentUploadStore
         self.attachmentThumbnailService = attachmentThumbnailService
         self.chatConnectionManager = chatConnectionManager
         self.dateProvider = dateProvider
@@ -251,7 +254,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
                     // We reused a transit tier upload but the source couldn't be found.
                     // That transit tier upload is now invalid.
                     try await db.awaitableWrite { tx in
-                        try self.attachmentStore.markTransitTierUploadExpired(
+                        try self.attachmentUploadStore.markTransitTierUploadExpired(
                             attachment: attachmentStream.attachment,
                             info: transitTierInfo,
                             tx: tx
@@ -278,8 +281,8 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
                 lastDownloadAttemptTimestamp: nil
             )
 
-            try self.attachmentStore.markUploadedToMediaTier(
-                attachmentStream: attachmentStream,
+            try self.attachmentUploadStore.markUploadedToMediaTier(
+                attachment: attachmentStream.attachment,
                 mediaTierInfo: mediaTierInfo,
                 tx: tx
             )
@@ -332,8 +335,8 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
                 lastDownloadAttemptTimestamp: nil
             )
 
-            try self.attachmentStore.markThumbnailUploadedToMediaTier(
-                attachmentStream: attachmentStream,
+            try self.attachmentUploadStore.markThumbnailUploadedToMediaTier(
+                attachment: attachmentStream.attachment,
                 thumbnailMediaTierInfo: thumbnailInfo,
                 tx: tx
             )
@@ -501,7 +504,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
             if updateRecord || attachmentUploadRecord.uploadSessionUrl == nil {
                 try await db.awaitableWrite { tx in
                     attachmentUploadRecord.uploadSessionUrl = attempt.uploadLocation
-                    try self.attachmentStore.upsert(record: attachmentUploadRecord, tx: tx)
+                    try self.attachmentUploadStore.upsert(record: attachmentUploadRecord, tx: tx)
                 }
             }
 
@@ -550,7 +553,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
                 attachmentUploadRecord.uploadSessionUrl = nil
 
                 try await db.awaitableWrite { tx in
-                    try self.attachmentStore.upsert(record: attachmentUploadRecord, tx: tx)
+                    try self.attachmentUploadStore.upsert(record: attachmentUploadRecord, tx: tx)
                 }
                 return try await upload(
                     attachment: attachment,
@@ -569,7 +572,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
                 } else {
                     attachmentUploadRecord.attempt += 1
                     try await db.awaitableWrite { tx in
-                        try self.attachmentStore.upsert(record: attachmentUploadRecord, tx: tx)
+                        try self.attachmentUploadStore.upsert(record: attachmentUploadRecord, tx: tx)
                     }
                     if let statusCode = error.httpStatusCode {
                         logger.warn("Unexpected upload error [status: \(statusCode)]")
@@ -587,11 +590,11 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
     private func fetchOrCreateAttachmentRecord(
         for attachmentId: Attachment.IDType,
         sourceType: AttachmentUploadRecord.SourceType,
-        db: DB
+        db: any DB
     ) throws -> AttachmentUploadRecord {
         var attachmentUploadRecord: AttachmentUploadRecord
         if let record = try db.read(block: { tx in
-            try self.attachmentStore.fetchAttachmentUploadRecord(for: attachmentId, sourceType: sourceType, tx: tx)
+            try self.attachmentUploadStore.fetchAttachmentUploadRecord(for: attachmentId, sourceType: sourceType, tx: tx)
         }) {
             attachmentUploadRecord = record
         } else {
@@ -758,7 +761,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
 
     private func cleanup(record: AttachmentUploadRecord, logger: PrefixedLogger, tx: DBWriteTransaction) {
         do {
-            try self.attachmentStore.removeRecord(for: record.attachmentId, sourceType: record.sourceType, tx: tx)
+            try self.attachmentUploadStore.removeRecord(for: record.attachmentId, sourceType: record.sourceType, tx: tx)
         } catch {
             logger.warn("Failed to clean existing upload record for (\(record.attachmentId))")
         }
@@ -784,7 +787,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
             lastDownloadAttemptTimestamp: nil
         )
 
-        try self.attachmentStore.markUploadedToTransitTier(
+        try self.attachmentUploadStore.markUploadedToTransitTier(
             attachmentStream: attachmentStream,
             info: transitTierInfo,
             tx: tx

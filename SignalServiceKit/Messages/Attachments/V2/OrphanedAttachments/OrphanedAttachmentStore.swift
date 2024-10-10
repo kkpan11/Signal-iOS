@@ -29,7 +29,7 @@ public class OrphanedAttachmentStoreImpl: OrphanedAttachmentStore {
         tx: DBReadTransaction
     ) -> Bool {
         return (try? OrphanedAttachmentRecord.exists(
-            SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database,
+            tx.databaseConnection,
             key: id
         )) ?? false
     }
@@ -38,34 +38,6 @@ public class OrphanedAttachmentStoreImpl: OrphanedAttachmentStore {
         _ record: inout OrphanedAttachmentRecord,
         tx: DBWriteTransaction
     ) throws {
-        try record.insert(SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database)
+        try record.insert(tx.databaseConnection)
     }
 }
-
-#if TESTABLE_BUILD
-
-open class MockOrphanedAttachmentStore: OrphanedAttachmentStore {
-
-    public init() {}
-
-    public var nextId: OrphanedAttachmentRecord.IDType = 1
-    public var ids = [OrphanedAttachmentRecord.IDType]()
-
-    open func orphanAttachmentExists(
-        with id: OrphanedAttachmentRecord.IDType,
-        tx: DBReadTransaction
-    ) -> Bool {
-        ids.contains(id)
-    }
-
-    open func insert(
-        _ record: inout OrphanedAttachmentRecord,
-        tx: DBWriteTransaction
-    ) throws {
-        ids.append(nextId)
-        record.sqliteId = nextId
-        nextId += 1
-    }
-}
-
-#endif

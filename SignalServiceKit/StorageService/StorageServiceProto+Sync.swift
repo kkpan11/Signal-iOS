@@ -592,7 +592,11 @@ class StorageServiceContactRecordUpdater: StorageServiceRecordUpdater {
                     Logger.warn("Recipient hidden remotely could not be hidden locally.")
                 }
             } else {
-                recipientHidingManager.removeHiddenRecipient(anyAddress, wasLocallyInitiated: false, tx: tx)
+                do {
+                    try recipientHidingManager.removeHiddenRecipient(anyAddress, wasLocallyInitiated: false, tx: tx)
+                } catch {
+                    Logger.warn("Recipient hidden remotely could not be unhidden locally.")
+                }
             }
         }
 
@@ -1839,9 +1843,17 @@ class StorageServiceCallLinkRecordUpdater: StorageServiceRecordUpdater {
     typealias RecordType = StorageServiceProtoCallLinkRecord
 
     let callLinkStore: any CallLinkRecordStore
+    private let callRecordDeleteManager: any CallRecordDeleteManager
+    private let callRecordStore: any CallRecordStore
 
-    init(callLinkStore: any CallLinkRecordStore) {
+    init(
+        callLinkStore: any CallLinkRecordStore,
+        callRecordDeleteManager: any CallRecordDeleteManager,
+        callRecordStore: any CallRecordStore
+    ) {
         self.callLinkStore = callLinkStore
+        self.callRecordDeleteManager = callRecordDeleteManager
+        self.callRecordStore = callRecordStore
     }
 
     func unknownFields(for record: StorageServiceProtoCallLinkRecord) -> UnknownStorage? { record.unknownFields }
@@ -1855,9 +1867,6 @@ class StorageServiceCallLinkRecordUpdater: StorageServiceRecordUpdater {
         unknownFields: UnknownStorage?,
         transaction tx: SDSAnyReadTransaction
     ) -> StorageServiceProtoCallLinkRecord? {
-        owsPrecondition(FeatureFlags.callLinkStorageService)
-        owsPrecondition(FeatureFlags.callLinkRecordTable)
-
         guard let rootKey = try? CallLinkRootKey(rootKeyData) else {
             owsFailDebug("Invalid CallLinkRootKey")
             return nil
@@ -1894,17 +1903,19 @@ class StorageServiceCallLinkRecordUpdater: StorageServiceRecordUpdater {
         _ record: StorageServiceProtoCallLinkRecord,
         transaction tx: SDSAnyWriteTransaction
     ) -> StorageServiceMergeResult<Data> {
-        owsPrecondition(FeatureFlags.callLinkStorageService)
-        owsPrecondition(FeatureFlags.callLinkRecordTable)
-
         guard let rootKeyData = record.rootKey, let rootKey = try? CallLinkRootKey(rootKeyData) else {
             owsFailDebug("invalid rootKey")
             return .invalid
         }
         do {
-            var callLink = try self.callLinkStore.fetchOrInsert(rootKey: rootKey, tx: tx.asV2Write)
+            var (callLink, _) = try self.callLinkStore.fetchOrInsert(rootKey: rootKey, tx: tx.asV2Write)
             // The earliest deletion timestamp takes precendence when merging.
             if record.deletedAtTimestampMs > 0 || callLink.adminDeletedAtTimestampMs != nil {
+                self.callRecordDeleteManager.deleteCallRecords(
+                    try self.callRecordStore.fetchExisting(conversationId: .callLink(callLinkRowId: callLink.id), limit: nil, tx: tx.asV2Read),
+                    sendSyncMessageOnDelete: false,
+                    tx: tx.asV2Write
+                )
                 callLink.markDeleted(atTimestampMs: [record.deletedAtTimestampMs, callLink.adminDeletedAtTimestampMs].compacted().min()!)
             } else if let adminPasskey = record.adminPasskey?.nilIfEmpty {
                 callLink.adminPasskey = adminPasskey

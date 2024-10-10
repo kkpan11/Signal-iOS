@@ -30,7 +30,7 @@ extension CallsListViewController {
     /// request additional items.
     struct ViewModelLoader {
         typealias CallViewModelForUpcomingCallLink = (
-            _ callLinkRecord: CallLinkRecord,
+            _ callLinkRowId: Int64,
             _ tx: DBReadTransaction
         ) -> CallViewModel
 
@@ -83,23 +83,34 @@ extension CallsListViewController {
 
         // MARK: - References
 
+        private enum Reference {
+            case upcomingCallLink(UpcomingCallLinkReference)
+            case callHistoryItem(CallHistoryItemReference)
+        }
+
         private struct UpcomingCallLinkReference {
-            let callLinkRoomId: Data
+            let callLinkRowId: Int64
 
             var viewModel: CallViewModel?
-            var viewModelReference: CallViewModel.Reference { .callLink(roomId: callLinkRoomId) }
+            var viewModelReference: CallViewModel.Reference { .callLink(rowId: callLinkRowId) }
         }
 
         private struct CallHistoryItemReference {
             let callRecordIds: NonEmptyArray<CallRecord.ID>
+            let callLinkRowId: Int64?
 
-            init(callRecordIds: NonEmptyArray<CallRecord.ID>) {
+            init(callRecordIds: NonEmptyArray<CallRecord.ID>, callLinkRowId: Int64?) {
                 self.callRecordIds = callRecordIds
+                self.callLinkRowId = callLinkRowId
             }
 
             var viewModel: CallViewModel?
             var viewModelReference: CallViewModel.Reference {
-                return .callRecords(primaryId: callRecordIds.first, coalescedIds: Array(callRecordIds.rawValue.dropFirst()))
+                if let callLinkRowId {
+                    return .callLink(rowId: callLinkRowId)
+                } else {
+                    return .callRecords(primaryId: callRecordIds.first, coalescedIds: Array(callRecordIds.rawValue.dropFirst()))
+                }
             }
         }
 
@@ -125,18 +136,42 @@ extension CallsListViewController {
         }
 
         func viewModelReference(at index: Int) -> CallViewModel.Reference {
+            switch reference(at: index) {
+            case .upcomingCallLink(let ref): return ref.viewModelReference
+            case .callHistoryItem(let ref): return ref.viewModelReference
+            }
+        }
+
+        /// Stores ROWIDs for the database rows backing a call list item.
+        struct ModelReferences {
+            var callLinkRowId: Int64?
+            var callRecordRowIds: [CallRecord.ID]
+        }
+
+        func modelReferences(at index: Int) -> ModelReferences {
+            switch reference(at: index) {
+            case .upcomingCallLink(let ref): return ModelReferences(callLinkRowId: ref.callLinkRowId, callRecordRowIds: [])
+            case .callHistoryItem(let ref): return ModelReferences(callLinkRowId: ref.callLinkRowId, callRecordRowIds: ref.callRecordIds.rawValue)
+            }
+        }
+
+        private func reference(at index: Int) -> Reference {
             var internalIndex = index
             if internalIndex < upcomingCallLinkReferences.count {
-                return upcomingCallLinkReferences[internalIndex].viewModelReference
+                return .upcomingCallLink(upcomingCallLinkReferences[internalIndex])
             }
             internalIndex -= upcomingCallLinkReferences.count
             if internalIndex < callHistoryItemReferences.count {
-                return callHistoryItemReferences[internalIndex].viewModelReference
+                return .callHistoryItem(callHistoryItemReferences[internalIndex])
             }
             owsFail("Must provide valid index.")
         }
 
         // MARK: - View Models
+
+        func viewModels() -> [CallViewModel?] {
+            return upcomingCallLinkReferences.map(\.viewModel) + callHistoryItemReferences.map(\.viewModel)
+        }
 
         /// Returns the view model at `index`.
         ///
@@ -206,8 +241,9 @@ extension CallsListViewController {
                 return
             }
             self.upcomingCallLinkReferences = upcomingCallLinks.map {
-                return UpcomingCallLinkReference(callLinkRoomId: $0.roomId)
+                return UpcomingCallLinkReference(callLinkRowId: $0.id)
             }
+            self.pruneDuplicateAdHocCalls()
         }
 
         /// Load a page of call history items in the requested direction.
@@ -267,20 +303,32 @@ extension CallsListViewController {
             if
                 fetchDirection == .newer,
                 let oldestGroupOfNewCallRecords = fetchResult.last,
-                let newestGroupOfOldCallRecords = callHistoryItemReferences.first?.viewModel?.callRecords,
+                let newestReference = callHistoryItemReferences.first,
+                let newestGroupOfOldCallRecords = newestReference.viewModel?.callRecords,
                 let oldestOldCallRecord = newestGroupOfOldCallRecords.last,
                 oldestGroupOfNewCallRecords.first.isValidCoalescingAnchor(for: oldestOldCallRecord),
                 (oldestGroupOfNewCallRecords.rawValue.count + newestGroupOfOldCallRecords.count) <= maxCoalescedCallsInOneViewModel
             {
                 let combinedGroupOfCallRecords = oldestGroupOfNewCallRecords + newestGroupOfOldCallRecords
                 callHistoryItemReferences[0] = CallHistoryItemReference(
-                    callRecordIds: combinedGroupOfCallRecords.map(\.id)
+                    callRecordIds: combinedGroupOfCallRecords.map(\.id),
+                    callLinkRowId: newestReference.callLinkRowId
                 )
                 fetchResult = fetchResult.dropLast()
             }
 
-            let fetchedCallHistoryItemReferences = fetchResult.map {
-                return CallHistoryItemReference(callRecordIds: $0.map(\.id))
+            let fetchedCallHistoryItemReferences = fetchResult.map { callRecord in
+                return CallHistoryItemReference(
+                    callRecordIds: callRecord.map(\.id),
+                    callLinkRowId: { () -> Int64? in
+                        switch callRecord.first.conversationId {
+                        case .thread(threadRowId: _):
+                            return nil
+                        case .callLink(let callLinkRowId):
+                            return callLinkRowId
+                        }
+                    }()
+                )
             }
 
             switch fetchDirection {
@@ -291,8 +339,23 @@ extension CallsListViewController {
             case .newer:
                 self.callHistoryItemReferences = fetchedCallHistoryItemReferences + self.callHistoryItemReferences
             }
+            self.pruneDuplicateAdHocCalls()
 
             return true
+        }
+
+        mutating func pruneDuplicateAdHocCalls() {
+            // Filter to show each call link only once.
+            var visitedIds = Set<Int64>()
+            self.callHistoryItemReferences.removeAll(where: {
+                if let callLinkRowId = $0.callLinkRowId, !visitedIds.insert(callLinkRowId).inserted {
+                    return true
+                }
+                return false
+            })
+            // Give precedence to historical calls rather than upcoming calls, though
+            // the two should be eventually consistent.
+            self.upcomingCallLinkReferences.removeAll(where: { visitedIds.contains($0.callLinkRowId) })
         }
 
         // MARK: - Rehydration
@@ -305,15 +368,7 @@ extension CallsListViewController {
             if internalIndex < upcomingCallLinkReferences.count {
                 let reference = upcomingCallLinkReferences[internalIndex]
                 if reference.viewModel == nil {
-                    let callLinkRecord: CallLinkRecord
-                    do {
-                        callLinkRecord = try callLinkStore.fetch(roomId: reference.callLinkRoomId, tx: tx) ?? {
-                            owsFail("Missing call link for existing reference!")
-                        }()
-                    } catch {
-                        owsFail("Couldn't fetch call link: \(error)")
-                    }
-                    upcomingCallLinkReferences[internalIndex].viewModel = callViewModelForUpcomingCallLink(callLinkRecord, tx)
+                    upcomingCallLinkReferences[internalIndex].viewModel = callViewModelForUpcomingCallLink(reference.callLinkRowId, tx)
                 }
                 return
             }
@@ -436,7 +491,8 @@ extension CallsListViewController {
                 }
                 if let callRecordIds = NonEmptyArray(reference.callRecordIds.rawValue.filter({ !callRecordIdsToDrop.contains($0) })) {
                     callHistoryItemReferences[internalIndex] = CallHistoryItemReference(
-                        callRecordIds: callRecordIds
+                        callRecordIds: callRecordIds,
+                        callLinkRowId: reference.callLinkRowId
                     )
                 } else {
                     callHistoryItemIndicesToRemove.insert(internalIndex)
@@ -445,38 +501,35 @@ extension CallsListViewController {
             callHistoryItemReferences.remove(atOffsets: callHistoryItemIndicesToRemove)
         }
 
-        /// Refreshes view models containing any of the given IDs. If no cached view
-        /// models contain a given ID, that ID is ignored.
+        /// Invalidates view models containing any of the given IDs.
         ///
         /// - Returns
-        /// References for any view models that were refreshed. Note that this will
-        /// not include any IDs that were ignored.
-        mutating func refreshViewModels(
-            callRecordIds callRecordsIdsToRefresh: [CallRecord.ID],
-            tx: DBReadTransaction
-        ) -> [CallViewModel.Reference] {
-            func refreshIfPossible(_ callRecord: CallRecord) -> CallRecord {
-                return fetchCallRecordBlock(callRecord.id, tx) ?? callRecord
+        /// References for any view models that were invalidated.
+        mutating func invalidate(callLinkRowIds: Set<Int64>, callRecordIds: Set<CallRecord.ID>) -> [CallViewModel.Reference] {
+            var invalidatedViewModelReferences = [CallViewModel.Reference]()
+
+            for internalIndex in upcomingCallLinkReferences.indices {
+                let reference = upcomingCallLinkReferences[internalIndex]
+                if callLinkRowIds.contains(reference.callLinkRowId) {
+                    upcomingCallLinkReferences[internalIndex].viewModel = nil
+                    invalidatedViewModelReferences.append(reference.viewModelReference)
+                }
             }
-
-            let callRecordsIdsToRefresh = Set(callRecordsIdsToRefresh)
-
-            var refreshedViewModelReferences = [CallViewModel.Reference]()
-
             for internalIndex in callHistoryItemReferences.indices {
-                guard let viewModel = callHistoryItemReferences[internalIndex].viewModel else {
-                    continue
+                let reference = callHistoryItemReferences[internalIndex]
+                let hasMatch = { () -> Bool in
+                    if let callLinkRowId = reference.callLinkRowId, callLinkRowIds.contains(callLinkRowId) {
+                        return true
+                    }
+                    return reference.callRecordIds.rawValue.contains(where: { callRecordIds.contains($0) })
+                }()
+                if hasMatch {
+                    callHistoryItemReferences[internalIndex].viewModel = nil
+                    invalidatedViewModelReferences.append(reference.viewModelReference)
                 }
-                guard viewModel.callRecords.contains(where: { callRecordsIdsToRefresh.contains($0.id) }) else {
-                    continue
-                }
-                let newCallRecords = viewModel.callRecords.map(refreshIfPossible(_:))
-                let newViewModel = callViewModelForCallRecords(newCallRecords, tx)
-                callHistoryItemReferences[internalIndex].viewModel = newViewModel
-                refreshedViewModelReferences.append(newViewModel.reference)
             }
 
-            return refreshedViewModelReferences
+            return invalidatedViewModelReferences
         }
     }
 }

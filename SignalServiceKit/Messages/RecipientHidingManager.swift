@@ -72,7 +72,11 @@ public protocol RecipientHidingManager {
     /// - Parameter wasLocallyInitiated: Whether the user initiated
     ///   the hide on this device (true) or a linked device (false).
     /// - Parameter tx: The transaction to use for database operations.
-    func removeHiddenRecipient(_ recipient: SignalRecipient, wasLocallyInitiated: Bool, tx: DBWriteTransaction)
+    func removeHiddenRecipient(
+        _ recipient: SignalRecipient,
+        wasLocallyInitiated: Bool,
+        tx: DBWriteTransaction
+    ) throws
 }
 
 public extension RecipientHidingManager {
@@ -156,7 +160,7 @@ public final class RecipientHidingManagerImpl: RecipientHidingManager {
                     ON hiddenRecipient.recipientId = \(signalRecipientColumn: .id)
             """
             return Set(
-                try SignalRecipient.fetchAll(SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database, sql: sql)
+                try SignalRecipient.fetchAll(tx.databaseConnection, sql: sql)
             )
         } catch {
             Logger.warn("Could not fetch hidden recipient records: \(error.grdbErrorForLogging)")
@@ -172,7 +176,7 @@ public final class RecipientHidingManagerImpl: RecipientHidingManager {
             return nil
         }
 
-        let db = SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database
+        let db = tx.databaseConnection
 
         do {
             return try HiddenRecipient.fetchOne(db, key: signalRecipientRowId)
@@ -284,7 +288,7 @@ public final class RecipientHidingManagerImpl: RecipientHidingManager {
             signalRecipientRowId: signalRecipientRowId,
             inKnownMessageRequestState: inKnownMessageRequestState
         )
-        try record.save(SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database)
+        try record.save(tx.databaseConnection)
 
         didSetAsHidden(recipient: recipient, wasLocallyInitiated: wasLocallyInitiated, tx: tx)
     }
@@ -293,14 +297,14 @@ public final class RecipientHidingManagerImpl: RecipientHidingManager {
         _ recipient: SignalRecipient,
         wasLocallyInitiated: Bool,
         tx: DBWriteTransaction
-    ) {
+    ) throws {
         if let id = recipient.id, isHiddenRecipient(recipient, tx: tx) {
             Logger.info("Unhiding recipient")
             let sql = """
                 DELETE FROM \(HiddenRecipient.databaseTableName)
                 WHERE \(HiddenRecipient.CodingKeys.signalRecipientRowId.stringValue) = ?
             """
-            SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.execute(sql: sql, arguments: [id])
+            try tx.databaseConnection.execute(sql: sql, arguments: [id])
             didSetAsUnhidden(recipient: recipient, wasLocallyInitiated: wasLocallyInitiated, tx: tx)
         }
     }

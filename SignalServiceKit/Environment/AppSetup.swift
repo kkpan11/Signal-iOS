@@ -40,6 +40,7 @@ public class AppSetup {
         let signalService: (any OWSSignalServiceProtocol)?
         let storageServiceManager: (any StorageServiceManager)?
         let subscriptionManager: (any SubscriptionManager)?
+        let svr: SecureValueRecovery?
         let syncManager: (any SyncManagerProtocol)?
         let systemStoryManager: (any SystemStoryManagerProtocol)?
         let versionedProfiles: (any VersionedProfilesSwift)?
@@ -65,6 +66,7 @@ public class AppSetup {
             signalService: (any OWSSignalServiceProtocol)? = nil,
             storageServiceManager: (any StorageServiceManager)? = nil,
             subscriptionManager: (any SubscriptionManager)? = nil,
+            svr: SecureValueRecovery? = nil,
             syncManager: (any SyncManagerProtocol)? = nil,
             systemStoryManager: (any SystemStoryManagerProtocol)? = nil,
             versionedProfiles: (any VersionedProfilesSwift)? = nil,
@@ -89,6 +91,7 @@ public class AppSetup {
             self.signalService = signalService
             self.storageServiceManager = storageServiceManager
             self.subscriptionManager = subscriptionManager
+            self.svr = svr
             self.syncManager = syncManager
             self.systemStoryManager = systemStoryManager
             self.versionedProfiles = versionedProfiles
@@ -297,7 +300,7 @@ public class AppSetup {
             tsAccountManager: tsAccountManager
         )
 
-        let svr = SecureValueRecovery2Impl(
+        let svr = testDependencies.svr ?? SecureValueRecovery2Impl(
             accountAttributesUpdater: accountAttributesUpdater,
             appContext: SVR2.Wrappers.AppContext(),
             appReadiness: appReadiness,
@@ -334,7 +337,20 @@ public class AppSetup {
 
         let attachmentStore = AttachmentStoreImpl()
         let orphanedAttachmentStore = OrphanedAttachmentStoreImpl()
+        let attachmentUploadStore = AttachmentUploadStoreImpl(attachmentStore: attachmentStore)
         let attachmentDownloadStore = AttachmentDownloadStoreImpl(dateProvider: dateProvider)
+
+        let orphanedBackupAttachmentStore = OrphanedBackupAttachmentStoreImpl()
+        let orphanedBackupAttachmentManager = OrphanedBackupAttachmentManagerImpl(
+            appReadiness: appReadiness,
+            attachmentStore: attachmentStore,
+            db: db,
+            messageBackupKeyMaterial: messageBackupKeyMaterial,
+            messageBackupRequestManager: messageBackupRequestManager,
+            orphanedBackupAttachmentStore: orphanedBackupAttachmentStore,
+            tsAccountManager: tsAccountManager
+        )
+
         let attachmentDownloadManager = AttachmentDownloadManagerImpl(
             appReadiness: appReadiness,
             attachmentDownloadStore: attachmentDownloadStore,
@@ -349,6 +365,7 @@ public class AppSetup {
             messageBackupRequestManager: messageBackupRequestManager,
             orphanedAttachmentCleaner: orphanedAttachmentCleaner,
             orphanedAttachmentStore: orphanedAttachmentStore,
+            orphanedBackupAttachmentManager: orphanedBackupAttachmentManager,
             profileManager: AttachmentDownloadManagerImpl.Wrappers.ProfileManager(profileManager),
             signalService: signalService,
             stickerManager: AttachmentDownloadManagerImpl.Wrappers.StickerManager(),
@@ -361,6 +378,7 @@ public class AppSetup {
             attachmentStore: attachmentStore,
             orphanedAttachmentCleaner: orphanedAttachmentCleaner,
             orphanedAttachmentStore: orphanedAttachmentStore,
+            orphanedBackupAttachmentManager: orphanedBackupAttachmentManager,
             stickerManager: AttachmentManagerImpl.Wrappers.StickerManager()
         )
         let attachmentValidationBackfillMigrator = AttachmentValidationBackfillMigratorImpl(
@@ -374,7 +392,10 @@ public class AppSetup {
 
         let attachmentThumbnailService = AttachmentThumbnailServiceImpl()
 
-        let tsResourceStore = TSResourceStoreImpl(attachmentStore: attachmentStore)
+        let tsResourceStore = TSResourceStoreImpl(
+            attachmentStore: attachmentStore,
+            attachmentUploadStore: attachmentUploadStore
+        )
         let tsResourceManager = TSResourceManagerImpl(
             attachmentManager: attachmentManager,
             attachmentStore: attachmentStore,
@@ -541,6 +562,7 @@ public class AppSetup {
         let callLinkStore = CallLinkRecordStoreImpl()
         let deletedCallRecordStore = DeletedCallRecordStoreImpl()
         let deletedCallRecordCleanupManager = DeletedCallRecordCleanupManagerImpl(
+            callLinkStore: callLinkStore,
             dateProvider: dateProvider,
             db: db,
             deletedCallRecordStore: deletedCallRecordStore,
@@ -551,6 +573,7 @@ public class AppSetup {
             schedulers: schedulers
         )
         let callRecordSyncMessageConversationIdAdapater = CallRecordSyncMessageConversationIdAdapterImpl(
+            callLinkStore: callLinkStore,
             callRecordStore: callRecordStore,
             recipientDatabaseTable: recipientDatabaseTable,
             threadStore: threadStore
@@ -560,6 +583,11 @@ public class AppSetup {
             databaseStorage: databaseStorage,
             messageSenderJobQueue: messageSenderJobQueue,
             callRecordConversationIdAdapter: callRecordSyncMessageConversationIdAdapater
+        )
+        let adHocCallRecordManager = AdHocCallRecordManagerImpl(
+            callRecordStore: callRecordStore,
+            callLinkStore: callLinkStore,
+            outgoingSyncMessageManager: outgoingCallEventSyncMessageManager
         )
         let groupCallRecordManager = GroupCallRecordManagerImpl(
             callRecordStore: callRecordStore,
@@ -608,13 +636,17 @@ public class AppSetup {
         )
 
         let callRecordDeleteAllJobQueue = CallRecordDeleteAllJobQueue(
+            callLinkStore: callLinkStore,
             callRecordConversationIdAdapter: callRecordSyncMessageConversationIdAdapater,
+            callRecordDeleteManager: callRecordDeleteManager,
             callRecordQuerier: callRecordQuerier,
             db: db,
             interactionDeleteManager: interactionDeleteManager,
             messageSenderJobQueue: messageSenderJobQueue
         )
         let incomingCallEventSyncMessageManager = IncomingCallEventSyncMessageManagerImpl(
+            adHocCallRecordManager: adHocCallRecordManager,
+            callLinkStore: callLinkStore,
             callRecordStore: callRecordStore,
             callRecordDeleteManager: callRecordDeleteManager,
             groupCallRecordManager: groupCallRecordManager,
@@ -904,6 +936,7 @@ public class AppSetup {
         let attachmentUploadManager = AttachmentUploadManagerImpl(
             attachmentEncrypter: Upload.Wrappers.AttachmentEncrypter(),
             attachmentStore: attachmentStore,
+            attachmentUploadStore: attachmentUploadStore,
             attachmentThumbnailService: attachmentThumbnailService,
             chatConnectionManager: chatConnectionManager,
             dateProvider: dateProvider,
@@ -1120,6 +1153,7 @@ public class AppSetup {
 
         let dependenciesBridge = DependenciesBridge(
             accountAttributesUpdater: accountAttributesUpdater,
+            adHocCallRecordManager: adHocCallRecordManager,
             appExpiry: appExpiry,
             attachmentCloner: attachmentCloner,
             attachmentContentValidator: attachmentContentValidator,
@@ -1184,6 +1218,7 @@ public class AppSetup {
             messageBackupManager: messageBackupManager,
             messageStickerManager: messageStickerManager,
             nicknameManager: nicknameManager,
+            orphanedBackupAttachmentManager: orphanedBackupAttachmentManager,
             orphanedAttachmentCleaner: orphanedAttachmentCleaner,
             archivedPaymentStore: archivedPaymentStore,
             phoneNumberDiscoverabilityManager: phoneNumberDiscoverabilityManager,

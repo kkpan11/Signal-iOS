@@ -181,6 +181,10 @@ public class RemoteConfig {
         interval(.messageSendLogEntryLifetime, defaultInterval: 2 * kWeekInterval)
     }
 
+    public var maxSenderKeyAge: TimeInterval {
+        return Double(getStringConvertibleValue(forFlag: .maxSenderKeyAge, defaultValue: 2 * kWeekInMs)) / 1000
+    }
+
     public var maxGroupCallRingSize: UInt {
         getUIntValue(forFlag: .maxGroupCallRingSize, defaultValue: 16)
     }
@@ -248,13 +252,6 @@ public class RemoteConfig {
         )
     }
 
-    public var callLinkJoin: Bool {
-        return (
-            FeatureBuild.current == .dev
-            || FeatureBuild.current == .internal && isEnabled(.callLinkJoin)
-        )
-    }
-
     // MARK: UInt values
 
     private func getUIntValue(
@@ -281,11 +278,6 @@ public class RemoteConfig {
         forFlag flag: ValueFlag,
         defaultValue: V
     ) -> V where V: LosslessStringConvertible {
-        guard AppReadinessObjcBridge.isAppReady else {
-            owsFailDebug("Storage is not yet ready.")
-            return defaultValue
-        }
-
         guard let stringValue: String = value(flag) else {
             return defaultValue
         }
@@ -431,7 +423,6 @@ private enum IsEnabledFlag: String, FlagType {
     case applePayMonthlyDonationKillSwitch = "ios.applePayMonthlyDonationKillSwitch"
     case applePayOneTimeDonationKillSwitch = "ios.applePayOneTimeDonationKillSwitch"
     case automaticSessionResetKillSwitch = "ios.automaticSessionResetKillSwitch"
-    case callLinkJoin = "ios.callLink.join.v1"
     case cardGiftDonationKillSwitch = "ios.cardGiftDonationKillSwitch"
     case cardMonthlyDonationKillSwitch = "ios.cardMonthlyDonationKillSwitch"
     case cardOneTimeDonationKillSwitch = "ios.cardOneTimeDonationKillSwitch"
@@ -457,7 +448,6 @@ private enum IsEnabledFlag: String, FlagType {
         case .applePayMonthlyDonationKillSwitch: false
         case .applePayOneTimeDonationKillSwitch: false
         case .automaticSessionResetKillSwitch: false
-        case .callLinkJoin: false
         case .cardGiftDonationKillSwitch: false
         case .cardMonthlyDonationKillSwitch: false
         case .cardOneTimeDonationKillSwitch: false
@@ -484,7 +474,6 @@ private enum IsEnabledFlag: String, FlagType {
         case .applePayMonthlyDonationKillSwitch: false
         case .applePayOneTimeDonationKillSwitch: false
         case .automaticSessionResetKillSwitch: false
-        case .callLinkJoin: true
         case .cardGiftDonationKillSwitch: false
         case .cardMonthlyDonationKillSwitch: false
         case .cardOneTimeDonationKillSwitch: false
@@ -521,6 +510,7 @@ private enum ValueFlag: String, FlagType {
     case maxAttachmentDownloadSizeBytes = "global.attachments.maxBytes"
     case maxGroupCallRingSize = "global.calling.maxGroupCallRingSize"
     case maxNicknameLength = "global.nicknames.max"
+    case maxSenderKeyAge = "ios.maxSenderKeyAge"
     case messageSendLogEntryLifetime = "ios.messageSendLogEntryLifetime"
     case minNicknameLength = "global.nicknames.min"
     case paymentsDisabledRegions = "global.payments.disabledRegions"
@@ -545,6 +535,7 @@ private enum ValueFlag: String, FlagType {
         case .maxAttachmentDownloadSizeBytes: false
         case .maxGroupCallRingSize: false
         case .maxNicknameLength: false
+        case .maxSenderKeyAge: false
         case .messageSendLogEntryLifetime: false
         case .minNicknameLength: false
         case .paymentsDisabledRegions: false
@@ -571,6 +562,7 @@ private enum ValueFlag: String, FlagType {
         case .maxAttachmentDownloadSizeBytes: false
         case .maxGroupCallRingSize: true
         case .maxNicknameLength: false
+        case .maxSenderKeyAge: true
         case .messageSendLogEntryLifetime: false
         case .minNicknameLength: false
         case .paymentsDisabledRegions: true
@@ -643,7 +635,7 @@ public class StubbableRemoteConfigManager: RemoteConfigManager {
 public class RemoteConfigManagerImpl: RemoteConfigManager {
     private let appExpiry: AppExpiry
     private let appReadiness: AppReadiness
-    private let db: DB
+    private let db: any DB
     private let keyValueStore: KeyValueStore
     private let tsAccountManager: TSAccountManager
     private let serviceClient: SignalServiceClient
@@ -668,7 +660,7 @@ public class RemoteConfigManagerImpl: RemoteConfigManager {
     public init(
         appExpiry: AppExpiry,
         appReadiness: AppReadiness,
-        db: DB,
+        db: any DB,
         keyValueStoreFactory: KeyValueStoreFactory,
         tsAccountManager: TSAccountManager,
         serviceClient: SignalServiceClient

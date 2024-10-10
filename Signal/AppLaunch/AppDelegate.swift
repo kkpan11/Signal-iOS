@@ -404,6 +404,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 authCredentialManager: databaseContinuation.authCredentialManager,
                 callLinkPublicParams: databaseContinuation.callLinkPublicParams,
                 callLinkStore: DependenciesBridge.shared.callLinkStore,
+                callRecordDeleteManager: DependenciesBridge.shared.callRecordDeleteManager,
+                callRecordStore: DependenciesBridge.shared.callRecordStore,
                 db: DependenciesBridge.shared.db,
                 mutableCurrentCall: _currentCall,
                 networkManager: NSObject.networkManager,
@@ -563,7 +565,6 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                     appContext: appContext,
                     authorMergeHelper: DependenciesBridge.shared.authorMergeHelper,
                     db: DependenciesBridge.shared.db,
-                    dbFromTx: { tx in SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database },
                     modelReadCaches: AuthorMergeHelperBuilder.Wrappers.ModelReadCaches(ModelReadCaches.shared),
                     recipientDatabaseTable: DependenciesBridge.shared.recipientDatabaseTable
                 ).buildTableIfNeeded()

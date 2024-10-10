@@ -12,10 +12,10 @@ final class LinkedDevicePniKeyManagerTest: XCTestCase {
     private struct TestKVStore {
         private static let hasSuspectedIssueKey = "hasSuspectedIssue"
 
-        private let db: DB
+        private let db: any DB
         private let kvStore: KeyValueStore
 
-        init(db: DB, kvStoreFactory: KeyValueStoreFactory) {
+        init(db: any DB, kvStoreFactory: KeyValueStoreFactory) {
             self.db = db
             self.kvStore = kvStoreFactory.keyValueStore(collection: "LinkedDevicePniKeyManagerImpl")
         }
@@ -25,7 +25,7 @@ final class LinkedDevicePniKeyManagerTest: XCTestCase {
         }
     }
 
-    private var db: MockDB!
+    private var db: InMemoryDB!
     private var kvStore: TestKVStore!
     private var messageProcessorMock: MessageProcessorMock!
     private var pniIdentityKeyCheckerMock: PniIdentityKeyCheckerMock!
@@ -43,7 +43,7 @@ final class LinkedDevicePniKeyManagerTest: XCTestCase {
         testScheduler = TestScheduler()
         let testSchedulers = TestSchedulers(scheduler: testScheduler)
 
-        db = MockDB()
+        db = InMemoryDB()
         kvStore = TestKVStore(db: db, kvStoreFactory: kvStoreFactory)
         messageProcessorMock = MessageProcessorMock(schedulers: testSchedulers)
         pniIdentityKeyCheckerMock = PniIdentityKeyCheckerMock()

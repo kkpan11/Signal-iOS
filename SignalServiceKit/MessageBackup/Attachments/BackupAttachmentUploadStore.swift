@@ -46,18 +46,7 @@ public class BackupAttachmentUploadStoreImpl: BackupAttachmentUploadStore {
         _ referencedAttachment: ReferencedAttachmentStream,
         tx: DBWriteTransaction
     ) throws {
-        try enqueue(
-            referencedAttachment,
-            tx: tx,
-            db: SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database
-        )
-    }
-
-    internal func enqueue(
-        _ referencedAttachment: ReferencedAttachmentStream,
-        tx: DBWriteTransaction,
-        db: GRDB.Database
-    ) throws {
+        let db = tx.databaseConnection
         var newRecord = QueuedBackupAttachmentUpload(
             attachmentRowId: referencedAttachment.attachment.id,
             sourceType: try referencedAttachment.reference.owner.asUploadSourceType()
@@ -100,18 +89,7 @@ public class BackupAttachmentUploadStoreImpl: BackupAttachmentUploadStore {
         count: UInt,
         tx: DBReadTransaction
     ) throws -> [QueuedBackupAttachmentUpload] {
-        return try fetchNextUploads(
-            count: count,
-            tx: tx,
-            db: SDSDB.shimOnlyBridge(tx).unwrapGrdbRead.database
-        )
-    }
-
-    internal func fetchNextUploads(
-        count: UInt,
-        tx: DBReadTransaction,
-        db: GRDB.Database
-    ) throws -> [QueuedBackupAttachmentUpload] {
+        let db = tx.databaseConnection
         return try QueuedBackupAttachmentUpload
             .order([
                 Column(QueuedBackupAttachmentUpload.CodingKeys.sourceType).asc,
@@ -125,29 +103,14 @@ public class BackupAttachmentUploadStoreImpl: BackupAttachmentUploadStore {
         for attachmentId: Attachment.IDType,
         tx: DBWriteTransaction
     ) throws {
-        try removeQueuedUpload(
-            for: attachmentId,
-            tx: tx,
-            db: SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database
-        )
-    }
-
-    internal func removeQueuedUpload(
-        for attachmentId: Attachment.IDType,
-        tx: DBWriteTransaction,
-        db: GRDB.Database
-    ) throws {
+        let db = tx.databaseConnection
         try QueuedBackupAttachmentUpload
             .filter(Column(QueuedBackupAttachmentUpload.CodingKeys.attachmentRowId) == attachmentId)
             .deleteAll(db)
     }
 
     public func removeAll(tx: DBWriteTransaction) throws {
-        try self.removeAll(db: SDSDB.shimOnlyBridge(tx).unwrapGrdbWrite.database, tx: tx)
-    }
-
-    internal func removeAll(db: GRDB.Database, tx: DBWriteTransaction) throws {
-        try QueuedBackupAttachmentUpload.deleteAll(db)
+        try QueuedBackupAttachmentUpload.deleteAll(tx.databaseConnection)
     }
 }
 
@@ -182,44 +145,3 @@ extension AttachmentReference.Owner {
         }
     }
 }
-
-#if TESTABLE_BUILD
-
-open class BackupAttachmentUploadStoreMock: BackupAttachmentUploadStore {
-
-    public init() {}
-
-    var nextId: Int64 = 1
-    open var queue = [QueuedBackupAttachmentUpload]()
-
-    public func enqueue(
-        _ referencedAttachment: ReferencedAttachmentStream,
-        tx: DBWriteTransaction
-    ) throws {
-        queue.append(.init(
-            id: nextId,
-            attachmentRowId: referencedAttachment.attachment.id,
-            sourceType: try referencedAttachment.reference.owner.asUploadSourceType())
-        )
-    }
-
-    public func fetchNextUploads(
-        count: UInt,
-        tx: DBReadTransaction
-    ) throws -> [QueuedBackupAttachmentUpload] {
-        return Array(queue.prefix(Int(count)))
-    }
-
-    public func removeQueuedUpload(
-        for attachmentId: Attachment.IDType,
-        tx: DBWriteTransaction
-    ) throws {
-        queue.removeAll(where: { $0.attachmentRowId == attachmentId })
-    }
-
-    public func removeAll(tx: DBWriteTransaction) throws {
-        queue.removeAll()
-    }
-}
-
-#endif
